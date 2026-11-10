@@ -48,6 +48,9 @@ void setupV2PipelineOptions(const BiShengIRCompileMainConfig &config,
                             const hivm::HIVMPipelineOptions &hivmOptions,
                             hivm::v2::V2PipelineOptions &v2Options) {
   v2Options.target = hacc::stringifyTargetDeviceEnum(config.getTarget()).str();
+  v2Options.checkpointOutput = config.getHIVMPreVectorizeCheckpoint();
+  v2Options.recipe = config.getHIVMPreVectorizeRecipe();
+  v2Options.recipeEntry = config.getHIVMPreVectorizeRecipeEntry();
   v2Options.enablePreload = hivmOptions.enablePreload;
   v2Options.enableMultiBuffer = config.getEnableAutoMultiBuffer();
 }
@@ -85,6 +88,21 @@ void appendV2Pipeline(OpPassManager &pm,
 
 void buildV2HIRPipeline(OpPassManager &pm,
                         const BiShengIRCompileMainConfig &config) {
+  if (config.getHIVMReplayPreVectorize()) {
+    validateV2Target(config);
+    hivm::HIVMPipelineOptions hivmOptions;
+    setupHIVMPipelineOptions(hivmOptions, config);
+    hivm::v2::V2PipelineOptions options;
+    setupV2PipelineOptions(config, hivmOptions, options);
+    pm.addPass(
+        hivm::v2::createPreVectorizeCheckpointPass(options.target, true));
+    hivm::v2::buildV2VectorizationPhase(pm, options);
+    hivm::v2::buildV2BufferizationPhase(pm, options);
+    // Standalone opt checkpoints do not carry the driver's inferred module
+    // core type. Recompute it for the backend after applying the recipe.
+    pm.addPass(hivm::createInferFuncCoreTypePass());
+    return;
+  }
   if (!config.getCompileHost()) {
     pm.addPass(
         hacc::createAppendDeviceSpecPass(hacc::AppendTargetDeviceSpecOptions{

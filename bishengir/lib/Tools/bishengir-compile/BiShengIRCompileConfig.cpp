@@ -464,7 +464,23 @@ applyMultiBufferModeCompatibility(BiShengIRCompileMainConfig &config) {
   }
 }
 
+static void
+validateExternalRecipeOptions(const BiShengIRCompileMainConfig &config) {
+  if (config.getHIVMPreVectorizeCheckpoint().empty() &&
+      config.getHIVMPreVectorizeRecipe().empty() &&
+      !config.getHIVMReplayPreVectorize())
+    return;
+  if (config.getUsePipelineVersion() != 2 ||
+      !mlir::hacc::utils::isRegBasedArch(config.getTarget()) ||
+      !config.getEnableHIVMCompile())
+    report_fatal_error(
+        "external recipes and checkpoint replay require a reg-based target, "
+        "--use-pipeline-version=2 and HIVM compilation",
+        false);
+}
+
 BiShengIRCompileMainConfig BiShengIRCompileMainConfig::createFromCLOptions() {
+  validateExternalRecipeOptions(*clOptionsConfig);
   BiShengIRCompileMainConfig::collectHIVMCArgs();
   applyArchDependentCompileDefaults(*clOptionsConfig);
   applyMultiBufferModeCompatibility(*clOptionsConfig);
@@ -473,6 +489,7 @@ BiShengIRCompileMainConfig BiShengIRCompileMainConfig::createFromCLOptions() {
 
 BiShengIRCompileMainConfig
 BiShengIRCompileMainConfig::createFromCLOptions(bool regbase) {
+  validateExternalRecipeOptions(*clOptionsConfig);
   if (regbase) {
     BiShengIRCompileMainConfig::collectHIVMCArgs(*clOptionsConfig);
     // Enforce <= 3 items

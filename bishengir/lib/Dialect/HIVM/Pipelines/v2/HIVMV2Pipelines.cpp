@@ -99,7 +99,16 @@ static void buildPreVectorizationPhase(OpPassManager &pm,
 /// Tensor phase on the unsplit MIX.
 void buildV2TensorPhase(OpPassManager &pm, const V2PipelineOptions &options) {
   buildPreVectorizationPhase(pm, options);
+  buildV2VectorizationPhase(pm, options);
+}
 
+void buildV2VectorizationPhase(OpPassManager &pm,
+                               const V2PipelineOptions &options) {
+  if (!options.checkpointOutput.empty())
+    pm.addPass(createPreVectorizeCheckpointPass(options.target, false,
+                                                options.checkpointOutput));
+  if (!options.recipe.empty())
+    pm.addPass(createExternalRecipePass(options.recipe, options.recipeEntry));
   pm.addPass(createHIVMVectorizePass());
 }
 
@@ -238,6 +247,17 @@ void buildV2HIVMPipeline(OpPassManager &pm, const V2PipelineOptions &options) {
 
 void registerV2HIVMPipelines() {
   PassPipelineRegistration<V2PipelineOptions>(
+      "hivm-v2-replay-pre-vectorize",
+      "Resume a prepared hivm.pre-vectorize checkpoint through the HIVM tail",
+      [](OpPassManager &pm, const V2PipelineOptions &options) {
+        resolveTarget(options);
+        pm.addPass(createPreVectorizeCheckpointPass(options.target, true));
+        buildV2VectorizationPhase(pm, options);
+        buildV2BufferizationPhase(pm, options);
+        buildV2PostBufferizationPhase(pm, options);
+        buildV2PerCoreTail(pm);
+      });
+  PassPipelineRegistration<V2PipelineOptions>(
       "hivm-v2-pre-vectorize-pipeline",
       "Prepare HIVM tensor IR up to the v2 vectorization boundary",
       [](OpPassManager &pm, const V2PipelineOptions &options) {
@@ -247,6 +267,7 @@ void registerV2HIVMPipelines() {
               {device, /*customAICNumber=*/-1, /*customAIVNumber=*/-1,
                /*hivmcVersion=*/{}}));
         buildPreVectorizationPhase(pm, options);
+        pm.addPass(createPreVectorizeCheckpointPass(options.target, false));
       });
   PassPipelineRegistration<V2PipelineOptions>(
       "hivm-v2-pipeline", "MIX HIVM pipeline (unsplit until the memref split)",

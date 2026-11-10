@@ -617,6 +617,10 @@ HIVMCMainConfig HIVMCFromBiShengIRConfig(BiShengIRCompileMainConfig &config,
   hivmcConfig.enableAutoCVBalance(true);
   hivmcConfig.setUseDPX(true);
   hivmcConfig.onlyRunHIVMPipeline(false);
+#if !BISHENGIR_PUBLISH
+  // Preserve the requested stopping point for direct and checkpoint replay.
+  hivmcConfig.compileLIR(config.getEnableLIRCompile());
+#endif
 
   hivmcConfig.appendBishengOptions(config.getAppendBishengOptions());
   hivmcConfig.compileTriton(config.getEnableTritonKernelCompile());

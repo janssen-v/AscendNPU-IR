@@ -123,6 +123,26 @@ def UsePipelineVersion : FeatureControlOptions<
   "1"
 >;
 
+def HIVMPreVectorizeCheckpoint : FeatureControlOptions<
+  "Save the driver pre-vectorization checkpoint as bytecode.",
+  "std::string", "\"\""
+>;
+
+def HIVMReplayPreVectorize : FeatureControlOptions<
+  "Resume a hivm.pre-vectorize checkpoint without frontend preparation.",
+  "bool", "false"
+>;
+
+def HIVMPreVectorizeRecipe : FeatureControlOptions<
+  "External Transform recipe at hivm.pre-vectorize (pipeline version 2).",
+  "std::string", "\"\""
+>;
+
+def HIVMPreVectorizeRecipeEntry : FeatureControlOptions<
+  "Named sequence entry for the external pre-vectorization recipe.",
+  "std::string", "\"__transform_main\""
+>;
+
 def EnableHfusionCompile : FeatureControlOptions<
   "Enable BiShengHIR HFusion compilation.",
   "bool",
@@ -202,7 +222,6 @@ def EnableLIRCompile : FeatureControlOptions<
   "bool",
   "true"
 > {
-  let emitGetterSetter = 0;
   bit isSharedWithDownstreamToolchain = 1;
 }
 

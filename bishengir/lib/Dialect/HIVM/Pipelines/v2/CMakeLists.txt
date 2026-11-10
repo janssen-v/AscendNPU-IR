@@ -1,5 +1,6 @@
 add_bishengir_dialect_library(BiShengIRHIVMV2Pipelines
   HIVMV2Pipelines.cpp
+  ExternalRecipe.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${MLIR_MAIN_INCLUDE_DIR}/bishengir/Dialect/HIVM/Pipelines/v2
@@ -9,6 +10,8 @@ add_bishengir_dialect_library(BiShengIRHIVMV2Pipelines
   BiShengIRHFusionTransforms
   BiShengIRHIVMPipelines
   BiShengIRHIVMTransforms
+  BiShengIRHIVMTransactions
+  MLIRTransformDialectTransforms
   BiShengIRMemRefExtLowering
   BiShengIRMemRefTransforms
   BiShengIRSCFTransforms
