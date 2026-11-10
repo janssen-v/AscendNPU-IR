@@ -86,6 +86,51 @@ The hook validates the subject format only. The commit body and the mandatory
 When a first-level component or dialect is added or renamed, update the module
 list and regex in `AGENTS.md`, `.gitmessage`, and `.githooks/pre-push` together.
 
+## Server Build Configuration
+
+If `NPUIR_REFERENCE_CHECKOUT` is set locally and
+`${NPUIR_REFERENCE_CHECKOUT}/.vscode/settings.json` exists, read it for the
+working CMake configuration and CANN environment. Keep personal checkout paths
+in local environment settings rather than this versioned file. Translate its active
+`cmake.configureSettings` and `cmake.environment` entries into the shell
+configuration; ignore commented-out alternatives. Resolve `${workspaceFolder}`
+against the current checkout, not the reference checkout.
+
+Initialize the required submodules at their recorded revisions before building.
+When using the reference configuration, use `third-party/llvm-project/llvm`
+as the CMake source directory and `build_a5`
+as the build directory, with Ninja and `/usr/bin/clang` / `/usr/bin/clang++`.
+The reference configuration uses the Ubuntu 20.04 sysroot and CANN 9.3.0 A5
+toolchain; preserve its BiShengIR, Triton, template, and SHMEM settings. Apply
+the same environment when configuring, building, and running tests. Limit
+parallel linking according to available memory.
+
+When using that Ubuntu 20.04 sysroot with the server's Clang 22 installation,
+also set `CMAKE_C_FLAGS` and
+`CMAKE_CXX_FLAGS` to
+`--target=x86_64-linux-gnu --gcc-toolchain=/opt/sysroots/ubuntu-20.04/usr`.
+This selects the sysroot's GCC runtime rather than the host Fedora runtime,
+which requires a newer glibc than the Ubuntu 20.04 sysroot provides.
+
+If the reference settings file is unavailable, source the installed CANN's
+`set_env.sh`, then build from the repository root:
+
+```bash
+source /path/to/cann/set_env.sh
+bash build-tools/build.sh -t --build-shmem-template --fast-build -o build \
+  --bisheng-compiler /path/to/cann/bin --enable-lld -r
+```
+
+Replace both placeholder paths with the appropriate paths for the installed
+CANN version; `--bisheng-compiler` must point to its `cann/bin` directory.
+Use the sourced CANN environment for subsequent builds and tests.
+
+Run the focused transaction tests with
+`ninja -C build_a5 run-BiShengIRHIVMTransactionTests`, followed by
+`ninja -C build_a5 check-bishengir`. For the fallback build above, replace
+`build_a5` with `build` in both commands. Do not substitute a nearby checkout's
+binaries for validation of the current source.
+
 ## LLVM/MLIR Submodule Changes
 
 `third-party/llvm-project` is a separate upstream-derived submodule. Keep

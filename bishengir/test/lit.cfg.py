@@ -117,6 +117,7 @@ tools = [
     "bishengir-capi-ir-test",
     "bishengir-capi-pass-test",
     "mlir-cpu-runner",
+    "mlir-translate",
     add_runtime("mlir_runner_utils"),
     add_runtime("mlir_c_runner_utils"),
 ]

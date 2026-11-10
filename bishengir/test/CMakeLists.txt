@@ -22,6 +22,7 @@ set(BISHENGIR_TEST_DEPENDS
   bishengir-compile
   bishengir-opt
   bishengir-translate
+  mlir-translate
   bishengir-options-tblgen
   bishengir-hivm-ir-contract-tblgen
   bishengir-target-spec-tblgen
