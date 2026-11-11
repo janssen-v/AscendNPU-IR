@@ -1,12 +1,66 @@
 #!/usr/bin/env python3
+import ctypes as C
 import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import evaluate
 import acl_runner
+
+
+class ACLLauncherTests(unittest.TestCase):
+    def setUp(self):
+        self.library = Mock()
+        with patch.object(acl_runner.C, "CDLL", return_value=self.library):
+            # The mock still receives the actual ctypes argtypes/restype setup.
+            self.library.configure_mock(**{
+                name + ".return_value": 0 for name in
+                ("aclInit", "aclrtSetDevice", "aclrtCreateStream")})
+            self.runtime = acl_runner.ACL("unused.so", 0)
+
+    def test_load_vector_binary_eagerly(self):
+        def load(data, size, configuration, handle):
+            self.assertEqual(C.string_at(data, size), b"fixture ELF")
+            options = C.cast(configuration, C.POINTER(
+                acl_runner.BinaryLoadOptions)).contents
+            self.assertEqual(options.num_options, 2)
+            self.assertEqual([(options.options[i].type, options.options[i].value.magic)
+                              for i in range(2)], [(1, 0), (2, 0x41415246)])
+            C.cast(handle, C.POINTER(C.c_void_p))[0] = 123
+            return 0
+
+        self.library.aclrtBinaryLoadFromData.side_effect = load
+        self.library.aclrtBinaryGetFunction.return_value = 0
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "kernel.o"
+            binary.write_bytes(b"fixture ELF")
+            self.runtime.load(binary, "add")
+        self.library.aclrtBinaryLoadFromFile.assert_not_called()
+        self.assertEqual(self.runtime.binaries[0].value, 123)
+
+    def test_launch_copies_host_pointer_arguments(self):
+        self.runtime.stream = C.c_void_p(99)
+
+        def launch(function, blocks, stream, config, arguments, size, placeholders, count):
+            self.assertEqual((function.value, blocks, stream.value), (17, 1, 99))
+            self.assertIsNone(config)
+            self.assertIsNone(placeholders)
+            self.assertEqual(count, 0)
+            self.assertEqual(size, 3 * C.sizeof(C.c_void_p))
+            self.assertEqual(list(arguments), [0x120000017000, 0x120000018000, 0x120000019000])
+            return 0
+
+        self.library.aclrtLaunchKernelWithHostArgs.side_effect = launch
+        self.library.aclrtSynchronizeStream.return_value = 0
+        pointers = [C.c_void_p(x) for x in (0x120000017000, 0x120000018000, 0x120000019000)]
+        self.runtime.launch(C.c_void_p(17), pointers, 1)
+        self.library.aclrtLaunchKernel.assert_not_called()
+        self.library.aclrtSynchronizeStream.assert_called_once_with(self.runtime.stream)
+        self.library.aclrtSynchronizeStream.reset_mock()
+        self.runtime.launch(C.c_void_p(17), pointers, 1, synchronize=False)
+        self.library.aclrtSynchronizeStream.assert_not_called()
 
 
 class EvaluationTests(unittest.TestCase):

@@ -2,10 +2,10 @@
 
 This Linux/POSIX coordinator captures an existing `hivm.pre-vectorize`
 checkpoint and optional Transform recipe, then runs the HIVM suffix in a separate
-`bishengir-opt` process. It does not change normal compilation or vectorization.
-It stops at the existing HIVM pipeline output, not a device binary. Numerical
-correctness, device timing, candidate promotion and a driver/backend adapter
-are subsequent milestones.
+compiler process. The opt adapter emits IR; driver adapters emit LLVM IR or a
+linked device binary. The evaluator checks numerical correctness before measuring
+NPU execution. It does not change normal compilation or vectorization; candidate
+promotion remains a subsequent milestone.
 
 Use the server environment from AGENTS.md for creation and replay:
 
@@ -134,7 +134,8 @@ a runnable binary or an optimization result.
 
 ## Correctness evaluation
 
-The initial evaluator supports one explicit ABI: three device pointers in order
+The initial evaluator supports standalone AIV kernels with one explicit ABI:
+three device pointers in order
 `lhs, rhs, output`, contiguous f32 tensors of the declared shape, no workspace
 or hidden arguments. It uses two independent correctness runs (baseline and
 candidate), each isolated in a disposable ACL subprocess. Both must pass against
@@ -172,9 +173,8 @@ sizes and nonfinite values fail correctness. The tolerances use
 
 Eight evaluation tests cover reproducible inputs, both verdicts, retained
 mismatches, compiler errors, execution crashes/timeouts and invalid specs. They
-use subprocess fixtures and do not claim NPU execution. The actual ACL library
-on this server loads but reports `aclInit` error 500000; no hardware execution
-has been validated here.
+use subprocess fixtures and do not claim NPU execution. The original build server has no NPU and reports `aclInit` error 500000.
+Hardware validation on `npu-s5-docker` is recorded below.
 
 ## Correctness-gated NPU measurements
 
@@ -195,7 +195,7 @@ NPU with matching target hardware and repeat independent runs to assess noise.
 
 Eleven evaluator tests cover correctness gating, warmups/interleaving, malformed
 samples and benchmark errors in addition to the correctness cases. Timing tests
-use explicit fixtures; actual NPU timing remains unvalidated on this server.
+use explicit fixtures; hardware measurements are recorded below.
 
 ## One-command tensor-add demonstration
 
@@ -209,7 +209,7 @@ bash tools/experiments/run-demo.sh /absolute/new-result-directory
 
 The script initializes recorded submodules, configures a release A5 build, builds
 both compiler tools and their dependencies, then runs the demo. It requires Git,
-CMake, Ninja, Clang/LLD, Python 3, CANN 9.3-compatible development/runtime files,
+CMake, Ninja, Clang/LLD, Python 3, compatible CANN development/runtime files,
 and the compiler's normal build dependencies. It does not install system packages.
 Use `CMAKE_BUILD_PARALLEL_LEVEL` to set build concurrency (default 4; one linker).
 `NPUIR_BUILD_DIR` selects an existing build; `NPUIR_SKIP_BUILD=1` skips rebuilding.
@@ -274,9 +274,8 @@ still determines which frontend operations are deferred to HIVM.
 
 The replacement add demo and its HFusion baseline both produce linked device
 ELFs locally. Add/multiply lowering, unsupported shapes, missing/incomplete
-recipes and driver LLVM replay are covered by lit tests. This is structural and
-binary-generation evidence only: numerical equivalence and timing on the NPU
-remain to be measured with the evaluator.
+recipes and driver LLVM replay are covered by lit tests. Hardware correctness and timing for the add recipe have also been checked on
+`npu-s5-docker`, as recorded below; multiply remains covered by lowering tests.
 
 Final validation after adding replacement routing: all four focused lit entries
 passed (including 18 coordinator tests and 11 evaluator tests), all 25 transaction
@@ -285,3 +284,106 @@ unsupported and exactly the same 16 documented baseline failures. Both no-op and
 replacement demo variants produced linked binaries. The existing-build shell
 entry point was exercised through retained ACL failure reports; fresh-machine
 bootstrap still depends on the listed system prerequisites.
+
+## NPU validation and launcher fix (2026-11-11)
+
+On `npu-s5-docker`, checkout `/root/dev/npuir-next` at `e3f4cb17c` plus
+this launcher fix was built from its pinned submodules. CANN is
+`/root/cann-9.2.0-beta2/cann` (9.2.0 beta2); measurements used Ascend 950
+device 0 and the `Ascend950PR_9579` compilation target.
+
+The original runner passed a Python host argument array to `aclrtLaunchKernel`,
+which expects device argument storage. Runtime logs showed a host virtual
+address as the parameter base, followed by invalid scalar GM access and ACL
+507015. It also loaded the standalone vector binary with the default AIC type.
+The corrected runner follows the installed Triton-Ascend launcher:
+
+- `aclrtBinaryLoadFromData` with eager loading and
+  `ACL_RT_BINARY_MAGIC_ELF_VECTOR_CORE`. CANN 9.2 rejects the magic option with
+  `aclrtBinaryLoadFromFile`; loading from data is intentional.
+- `aclrtLaunchKernelWithHostArgs` to copy the host-resident pointer arguments.
+
+No compiler or recipe changes were needed to fix this runtime failure. Two
+regression tests check the ctypes loader options and host-launch argument order,
+including the unsynchronized launch used during timing. All 13 evaluator tests
+pass on both hosts, and the evaluator lit entry passes on the build server.
+
+Both the no-op demo and the replacement elementwise add recipe pass all three
+64-element f32 cases (seeds 7, 19, 42), with zero mismatches. Performance uses
+5 warmups and 20 alternating AB/BA rounds of 10 launches each. Initial medians:
+
+| Comparison | Baseline (microseconds) | Candidate (microseconds) |
+| --- | ---: | ---: |
+| HFusion baseline / no-op recipe | 4.689 | 4.584 |
+| HFusion baseline / elementwise recipe | 3.566 | 3.443 |
+| Full v1 control / elementwise recipe | 2.890 | 2.854 |
+
+Two further elementwise evaluations also pass correctness. Their median pairs
+are 2.540/2.544 and 3.797/3.731 microseconds. These are event-timed launch
+measurements of a tiny kernel, including scheduling gaps; variation between runs
+and the no-op control preclude a speedup claim. The kernel is an infrastructure
+smoke test, not a performance benchmark suite.
+
+The v1 timing is a diagnostic control using v1 pipeline defaults, not a
+controlled performance comparison with the v2 suffix settings.
+
+The original vectorizer was checked separately with
+`--hfusion-auto-vectorize --outline-vector-function --canonicalize`, followed by
+`bishengir-compile --use-pipeline-version=1`. This control uses explicit
+`hivm.hir.load` operations for the tensor inputs so that the full v1 path receives
+UB operands at the outlined vector-function calls. Its binary reproduces 507015
+with the original runner and passes all three cases with the corrected runner.
+The demo baseline itself also uses this original HFusion vectorizer, followed by
+the v2 replay suffix. Neither observation indicates a vectorizer-specific GM bug.
+A raw v1 invocation without HFusion vectorization instead hits the separately
+known missing `_mlir_ciface_vadd_1d_float` template; do not conflate it with the
+launch failure.
+
+Retained remote artifacts:
+
+- `/root/dev/npuir-next-results-noop-fixed/evaluation/report.json`
+- `/root/dev/npuir-next-results-elementwise-fixed/evaluation/report.json`
+- `/root/dev/npuir-next-results-elementwise-repeat-{2,3}/report.json`
+- `/root/dev/npuir-gm-debug/v1-control-report.json` and `v1-control.py`, with
+  the explicit-load source, vectorized IR, LLVM IR, binary and old/new runner logs.
+
+Reproduce the corrected demo with a new output directory:
+
+```sh
+CANN_ROOT=/root/cann-9.2.0-beta2/cann \
+TOOLCHAIN_BIN=/root/cann-9.2.0-beta2/cann/tools/bisheng_compiler/bin \
+NPUIR_SKIP_BUILD=1 NPUIR_ELEMENTWISE=1 \
+bash tools/experiments/run-demo.sh /root/dev/new-elementwise-evaluation
+```
+
+## Next vectorizer experiments
+
+Keep the small MLIR example as a regression test. For research measurements,
+start from Python/Triton-Ascend kernels with PyTorch references, capture the same
+frontend IR for each comparison, and keep launch geometry, input shapes and
+non-vectorization settings fixed. Triton-generated kernels can have scalar,
+workspace or hidden launch arguments: extend the evaluator's explicit ABI
+contract instead of passing them to the current three-pointer runner unchanged.
+Separate the comparison with the production v1 pipeline from comparisons of two
+recipes at one common checkpoint.
+
+Suggested progression:
+
+1. Contiguous add/multiply: vary shapes and block sizes, then add masked tails.
+   This validates loads, stores, predicates and multi-block indexing. Current
+   recipe support is only identical `tensor<64xf32>` add/multiply; broader shapes,
+   masks and dtypes require implementation.
+2. Fused elementwise chains such as multiply-add and bias/residual/activation:
+   test vector-function fusion, intermediate UB traffic and register pressure.
+   Preserve floating-point operation order unless relaxed semantics are explicit.
+3. Broadcast and strided elementwise kernels: test vectorized axes and layout
+   choices, including rejection/fallback for unsupported layouts.
+4. Row reductions, then RMSNorm and softmax: test reduction trees, fusion and
+   numerical tolerances. These need new transform primitives and references.
+
+Start the optimization study with fused elementwise chains over a shape suite;
+use add as the negative control. Defer GEMM/attention and distributed collectives
+until vectorization effects can be separated from cube scheduling and networking.
+Use longer kernels or device-side replay for timing, repeated independent runs,
+and include zeros, extreme values, NaNs/infinities and dtype-specific tolerances
+in addition to the current finite random-input smoke tests.

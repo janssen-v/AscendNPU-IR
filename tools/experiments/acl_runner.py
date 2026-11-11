@@ -9,6 +9,18 @@ from pathlib import Path
 import sys
 
 
+class BinaryLoadOptionValue(C.Union):
+    _fields_ = [("magic", C.c_uint32), ("reserved", C.c_uint32 * 4)]
+
+
+class BinaryLoadOption(C.Structure):
+    _fields_ = [("type", C.c_int), ("value", BinaryLoadOptionValue)]
+
+
+class BinaryLoadOptions(C.Structure):
+    _fields_ = [("options", C.POINTER(BinaryLoadOption)), ("num_options", C.c_size_t)]
+
+
 class ACL:
     def __init__(self, library, device):
         self.lib = C.CDLL(library)
@@ -27,10 +39,11 @@ class ACL:
             "aclrtSynchronizeStream": [p],
             "aclrtMalloc": [pp, C.c_size_t, C.c_int], "aclrtFree": [p],
             "aclrtMemcpy": [p, C.c_size_t, p, C.c_size_t, C.c_int],
-            "aclrtBinaryLoadFromFile": [C.c_char_p, p, pp],
+            "aclrtBinaryLoadFromData": [p, C.c_size_t, p, pp],
             "aclrtBinaryUnLoad": [p],
             "aclrtBinaryGetFunction": [p, C.c_char_p, pp],
-            "aclrtLaunchKernel": [p, C.c_uint32, p, C.c_size_t, p],
+            "aclrtLaunchKernelWithHostArgs": [p, C.c_uint32, p, p, p,
+                                               C.c_size_t, p, C.c_size_t],
             "aclrtCreateEventWithFlag": [pp, C.c_uint32],
             "aclrtDestroyEvent": [p], "aclrtRecordEvent": [p, p],
             "aclrtEventElapsedTime": [C.POINTER(C.c_float), p, p],
@@ -65,15 +78,27 @@ class ACL:
     def load(self, binary, entry):
         handle = C.c_void_p()
         function = C.c_void_p()
-        self.call("aclrtBinaryLoadFromFile", str(binary).encode(), None, C.byref(handle))
+        # This runner executes standalone AIV kernels. CANN's file loader does
+        # not accept a core-type override and defaults to AIC. Match the
+        # Triton-Ascend loader: eager loading plus ELF_VECTOR_CORE magic.
+        options = (BinaryLoadOption * 2)(
+            BinaryLoadOption(1, BinaryLoadOptionValue(magic=0)),
+            BinaryLoadOption(2, BinaryLoadOptionValue(magic=0x41415246)))
+        configuration = BinaryLoadOptions(options, len(options))
+        data = binary.read_bytes()
+        buffer = C.create_string_buffer(data)
+        self.call("aclrtBinaryLoadFromData", buffer, len(data),
+                  C.byref(configuration), C.byref(handle))
         self.binaries.append(handle)
         self.call("aclrtBinaryGetFunction", handle, entry.encode(), C.byref(function))
         return function
 
     def launch(self, function, pointers, blocks, synchronize=True):
         arguments = (C.c_void_p * len(pointers))(*(p.value for p in pointers))
-        self.call("aclrtLaunchKernel", function, blocks, arguments,
-                  C.sizeof(arguments), self.stream)
+        # arguments lives in host memory; the device-argument API would pass
+        # this host address to the kernel, causing an invalid GM access.
+        self.call("aclrtLaunchKernelWithHostArgs", function, blocks, self.stream,
+                  None, arguments, C.sizeof(arguments), None, 0)
         if synchronize:
             self.call("aclrtSynchronizeStream", self.stream)
 
