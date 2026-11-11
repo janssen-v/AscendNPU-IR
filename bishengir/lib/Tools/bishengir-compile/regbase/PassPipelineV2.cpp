@@ -51,6 +51,7 @@ void setupV2PipelineOptions(const BiShengIRCompileMainConfig &config,
   v2Options.checkpointOutput = config.getHIVMPreVectorizeCheckpoint();
   v2Options.recipe = config.getHIVMPreVectorizeRecipe();
   v2Options.recipeEntry = config.getHIVMPreVectorizeRecipeEntry();
+  v2Options.replaceVectorization = config.getHIVMReplaceVectorization();
   v2Options.enablePreload = hivmOptions.enablePreload;
   v2Options.enableMultiBuffer = config.getEnableAutoMultiBuffer();
 }

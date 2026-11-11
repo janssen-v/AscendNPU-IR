@@ -73,4 +73,29 @@ def MapForallToHIVMBlocks :
   }];
 }
 
+def HIVMVectorizeElementwiseOp :
+  Op<Transform_Dialect, "hivm.vectorize_elementwise",
+    [FunctionalStyleTransformOpTrait,
+     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+     TransformOpInterface, TransformEachOpTrait]> {
+  let summary = "Vectorize static 64xf32 HIVM add and multiply operations";
+  let description = [{
+    Takes a module and replaces its tensor HIVM vadd/vmul operations with
+    calls to outlined vector functions. All matched operations are checked
+    before mutation. Only identical tensor<64xf32> operands/results are
+    supported. This initial experimental primitive does not tile, reassociate,
+    fuse, or handle broadcasting. An empty selection fails.
+  }];
+  let arguments = (ins TransformHandleTypeInterface:$target);
+  let results = (outs TransformHandleTypeInterface:$result);
+  let assemblyFormat = [{ $target attr-dict `:` functional-type($target, $result) }];
+  let extraClassDeclaration = [{
+    ::mlir::DiagnosedSilenceableFailure applyToOne(
+        ::mlir::transform::TransformRewriter &rewriter,
+        ::mlir::Operation *target,
+        ::mlir::transform::ApplyToEachResultList &results,
+        ::mlir::transform::TransformState &state);
+  }];
+}
+
 #endif // HIVM_TRANSFORMOPS_HIVMTRANSFORMOPS

@@ -45,8 +45,15 @@ if [[ ${NPUIR_SKIP_BUILD:-0} != 1 ]]; then
     -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_USE_OPTIMIZED_TABLEGEN=ON \
     -DLLVM_PARALLEL_LINK_JOBS=1 "${extra[@]}"
   cmake --build "$build_dir" --target bishengir-opt bishengir-compile \
+    bishengir_link_aic_c310_O2 bishengir_link_aiv_c310_O2 \
+    bishengir_link_mix_aic_c310_O2 bishengir_link_mix_aiv_c310_O2 \
+    bishengir_link_host_O2 \
     --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-4}"
+fi
+recipe_args=()
+if [[ ${NPUIR_ELEMENTWISE:-0} == 1 ]]; then
+  recipe_args+=(--elementwise-recipe)
 fi
 exec python3 tools/experiments/demo.py --build-dir "$build_dir" \
   --toolchain-bin "$TOOLCHAIN_BIN" --acl-library "$CANN_ROOT/lib64/libascendcl.so" \
-  --output "$output" --device "${NPUIR_DEVICE:-0}"
+  --output "$output" --device "${NPUIR_DEVICE:-0}" "${recipe_args[@]}"

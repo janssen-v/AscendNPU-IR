@@ -60,12 +60,14 @@ def source_identity(repo):
 
 def create(bundle, checkpoint, recipe, compiler, repo, target, entry,
            preload=False, multi_buffer=False, dependency=(), adapter="opt",
-           toolchain_bin=None, backend_options=""):
+           toolchain_bin=None, backend_options="", replace_vectorization=False):
     # Materialize inputs before publishing the manifest. No source paths are
     # needed for replay and subsequent edits to originals cannot change a run.
     compiler = compiler_identity(compiler)
     if adapter not in ("opt", "driver-llvm", "driver-binary"):
         raise ValueError("unsupported compiler adapter")
+    if replace_vectorization and not recipe:
+        raise ValueError("replacement requires a recipe")
     dependency = list(dependency)
     if toolchain_bin:
         toolchain_bin = Path(toolchain_bin).resolve(strict=True)
@@ -94,7 +96,8 @@ def create(bundle, checkpoint, recipe, compiler, repo, target, entry,
         "dependencies": {str(Path(p).resolve(strict=True)): digest(Path(p).read_bytes())
                          for p in dependency},
         "pipeline": {"target": target, "entry": entry,
-                     "enable_preload": preload, "enable_multi_buffer": multi_buffer},
+                     "enable_preload": preload, "enable_multi_buffer": multi_buffer,
+                     "replace_vectorization": replace_vectorization},
         "inputs": {"checkpoint.bc": digest(payload)},
     }
     if library is not None:
@@ -148,9 +151,14 @@ def validate(bundle, compiler):
         if digest((bundle / name).read_bytes()) != expected:
             raise ValueError("input digest mismatch: " + name)
     pipeline = manifest["pipeline"]
-    if not isinstance(pipeline, dict) or set(pipeline) != {
-            "target", "entry", "enable_preload", "enable_multi_buffer"}:
+    required = {"target", "entry", "enable_preload", "enable_multi_buffer"}
+    if (not isinstance(pipeline, dict) or not required <= set(pipeline)
+            or not set(pipeline) <= required | {"replace_vectorization"}):
         raise ValueError("incompatible pipeline options")
+    if type(pipeline.get("replace_vectorization", False)) is not bool:
+        raise ValueError("replacement switch must be boolean")
+    if pipeline.get("replace_vectorization", False) and "recipe.mlir" not in inputs:
+        raise ValueError("replacement requires a recipe")
     if not isinstance(pipeline["target"], str) or not re.fullmatch(
             r"[A-Za-z0-9_]+", pipeline["target"]):
         raise ValueError("invalid target")
@@ -235,6 +243,8 @@ def replay(bundle, output, compiler=None, timeout=60):
         options = ["target=" + p["target"],
                    "enable-preload=" + str(p["enable_preload"]).lower(),
                    "enable-multi-buffer=" + str(p["enable_multi_buffer"]).lower()]
+        if p.get("replace_vectorization", False):
+            options += ["replace-vectorization=true"]
         if "recipe.mlir" in manifest["inputs"]:
             options += ["recipe=recipe.mlir", "recipe-entry=" + p["entry"]]
         command = [actual["path"], "checkpoint.bc",
@@ -253,6 +263,8 @@ def replay(bundle, output, compiler=None, timeout=60):
             if "recipe.mlir" in manifest["inputs"]:
                 command += ["--hivm-pre-vectorize-recipe=recipe.mlir",
                             "--hivm-pre-vectorize-recipe-entry=" + p["entry"]]
+            if p.get("replace_vectorization", False):
+                command += ["--hivm-replace-vectorization"]
             if manifest["backend_options"]:
                 command += ["--append-bisheng-options=" + manifest["backend_options"]]
         result.update(experiment_id=manifest["experiment_id"], command=command,
@@ -304,6 +316,7 @@ def main():
     create_parser.add_argument("--entry", default="__transform_main")
     create_parser.add_argument("--preload", action="store_true")
     create_parser.add_argument("--multi-buffer", action="store_true")
+    create_parser.add_argument("--replace-vectorization", action="store_true")
     run_parser = commands.add_parser("replay")
     run_parser.add_argument("--bundle", required=True, type=Path)
     run_parser.add_argument("--output", required=True, type=Path)

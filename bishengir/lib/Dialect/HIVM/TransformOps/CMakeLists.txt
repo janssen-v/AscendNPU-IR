@@ -11,6 +11,7 @@ add_bishengir_dialect_library(BiShengIRHIVMTransformOps
   LINK_LIBS PUBLIC
   BiShengIRHIVMDialect
   BiShengIRMathExtDialect
+  MLIRFuncDialect
   MLIRArithDialect
   MLIRMathDialect
   MLIRMemRefDialect

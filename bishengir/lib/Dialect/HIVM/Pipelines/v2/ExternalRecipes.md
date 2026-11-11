@@ -114,3 +114,17 @@ from these results.
 The local ownership checker reports no CODEOWNERS match for the new recipe
 implementation, documentation, and two lit tests. Confirm the intended owners
 using workflow 2 in `tools/codeowners-check/DEVELOPER.en.md` before submission.
+
+## Experimental vectorization replacement
+
+The opt pipeline accepts `replace-vectorization=true` and the driver accepts
+`--hivm-replace-vectorization`. Both require an external recipe and bypass the
+built-in HIVM vectorization stage. Transactional validation rejects remaining
+`hivm.defer_vectorize` markers and tensor HIVM add/multiply operations. Default
+and additive compilation behavior is unchanged.
+
+The initial `transform.hivm.vectorize_elementwise` primitive outlines vector
+functions for identical `tensor<64xf32>` add/multiply operands/results. It rejects
+broadcast/transpose annotations, other shapes/dtypes, empty selections and
+nested vector-function work. See `tools/experiments/examples/elementwise.mlir`
+and `tools/experiments/README.md` for the saved-recipe evaluation workflow.

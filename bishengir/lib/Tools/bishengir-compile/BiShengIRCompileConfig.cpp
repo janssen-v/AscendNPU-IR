@@ -468,7 +468,8 @@ static void
 validateExternalRecipeOptions(const BiShengIRCompileMainConfig &config) {
   if (config.getHIVMPreVectorizeCheckpoint().empty() &&
       config.getHIVMPreVectorizeRecipe().empty() &&
-      !config.getHIVMReplayPreVectorize())
+      !config.getHIVMReplayPreVectorize() &&
+      !config.getHIVMReplaceVectorization())
     return;
   if (config.getUsePipelineVersion() != 2 ||
       !mlir::hacc::utils::isRegBasedArch(config.getTarget()) ||

@@ -13,7 +13,7 @@ from experiment import create, digest, replay, run_process, write_json
 
 
 def demo(build_dir, toolchain_bin, output, acl_library=None, device=0,
-         compile_only=False, timeout=120):
+         compile_only=False, timeout=120, elementwise_recipe=False):
     if not math.isfinite(timeout) or timeout <= 0 or type(device) is not int or device < 0:
         raise ValueError("invalid timeout or device")
     build_dir = Path(build_dir).resolve(strict=True)
@@ -25,7 +25,7 @@ def demo(build_dir, toolchain_bin, output, acl_library=None, device=0,
         source = output / "add.mlir"
         source.write_bytes((examples / "add.mlir").read_bytes())
         recipe = output / "recipe.mlir"
-        recipe.write_bytes((examples / "noop.mlir").read_bytes())
+        recipe.write_bytes((examples / ("elementwise.mlir" if elementwise_recipe else "noop.mlir")).read_bytes())
         specification = json.loads((examples / "add.json").read_text())
         specification["device"] = device
         write_json(output / "evaluation.json", specification)
@@ -39,15 +39,32 @@ def demo(build_dir, toolchain_bin, output, acl_library=None, device=0,
         if report["preparation"]["status"] != "success":
             report["status"] = "preparation_failed"
             return report
+        candidate_checkpoint = preparation / "checkpoint.bc"
+        if elementwise_recipe:
+            research_source = output / "add-hivm.mlir"
+            research_source.write_bytes((examples / "add-hivm.mlir").read_bytes())
+            research_preparation = output / "prepare-candidate"
+            research_preparation.mkdir()
+            command = [str(build_dir / "bin/bishengir-opt"), str(research_source),
+                       "--hivm-v2-pre-vectorize-pipeline", "--emit-bytecode", "-o", "checkpoint.bc"]
+            report["candidate_preparation"] = run_process(
+                command, research_preparation, dict(os.environ), timeout)
+            report["candidate_preparation"]["command"] = command
+            if report["candidate_preparation"]["status"] != "success":
+                report["status"] = "preparation_failed"
+                return report
+            candidate_checkpoint = research_preparation / "checkpoint.bc"
         dependencies = list((build_dir / "lib").glob("*.bc"))
         if not dependencies:
             raise ValueError("no template bitcode found in build/lib; build templates first")
         for label in ("baseline", "candidate"):
-            create(output / (label + "-bundle"), preparation / "checkpoint.bc",
+            create(output / (label + "-bundle"),
+                   candidate_checkpoint if label == "candidate" else preparation / "checkpoint.bc",
                    recipe if label == "candidate" else None,
                    build_dir / "bin/bishengir-compile", Path(__file__).resolve().parents[2],
                    "Ascend950PR_9579", "__transform_main", adapter="driver-binary",
-                   toolchain_bin=toolchain_bin, dependency=dependencies)
+                   toolchain_bin=toolchain_bin, dependency=dependencies,
+                   replace_vectorization=elementwise_recipe and label == "candidate")
         if compile_only:
             report["compilations"] = {
                 label: replay(output / (label + "-bundle"), output / (label + "-compile"), timeout=timeout)
@@ -77,6 +94,7 @@ def main():
     parser.add_argument("--acl-library", type=Path)
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--compile-only", action="store_true")
+    parser.add_argument("--elementwise-recipe", action="store_true")
     parser.add_argument("--timeout", type=float, default=120)
     try:
         result = demo(**vars(parser.parse_args()))

@@ -79,14 +79,20 @@ struct PreVectorizeCheckpointPass
 struct ExternalRecipePass
     : PassWrapper<ExternalRecipePass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ExternalRecipePass)
-  ExternalRecipePass(StringRef path, StringRef entry)
-      : path(path.str()), entry(entry.str()) {}
+  ExternalRecipePass(StringRef path, StringRef entry, bool replaceVectorization)
+      : path(path.str()), entry(entry.str()),
+        replaceVectorization(replaceVectorization) {}
   StringRef getArgument() const final { return "hivm-external-recipe"; }
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<transform::TransformDialect>();
   }
   void runOnOperation() override {
     auto root = getOperation();
+    if (path.empty()) {
+      root.emitError("vectorization replacement requires an external recipe");
+      signalPassFailure();
+      return;
+    }
     auto library = parseSourceFile<ModuleOp>(path, &getContext());
     if (!library) {
       signalPassFailure();
@@ -140,6 +146,19 @@ struct ExternalRecipePass
                   transform::TransformOptions())) ||
               failed(verify(*payload)))
             return result;
+          if (replaceVectorization) {
+            bool incomplete = false;
+            payload->walk([&](Operation *op) {
+              auto name = op->getName().getStringRef();
+              incomplete |= op->hasAttr("hivm.defer_vectorize") ||
+                            name == "hivm.hir.vadd" || name == "hivm.hir.vmul";
+            });
+            if (incomplete) {
+              result.diagnostics.push_back("replacement recipe left selected "
+                                           "elementwise work unvectorized");
+              return result;
+            }
+          }
           auto output = TransactionSession::serialize(payload->getOperation());
           if (!output) {
             result.diagnostics.push_back(llvm::toString(output.takeError()));
@@ -175,12 +194,15 @@ struct ExternalRecipePass
   }
   std::string path;
   std::string entry;
+  bool replaceVectorization;
 };
 } // namespace
 
 std::unique_ptr<Pass>
-mlir::hivm::v2::createExternalRecipePass(StringRef path, StringRef entry) {
-  return std::make_unique<ExternalRecipePass>(path, entry);
+mlir::hivm::v2::createExternalRecipePass(StringRef path, StringRef entry,
+                                         bool replaceVectorization) {
+  return std::make_unique<ExternalRecipePass>(path, entry,
+                                              replaceVectorization);
 }
 
 std::unique_ptr<Pass>

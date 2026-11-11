@@ -22,6 +22,7 @@
 
 #include "bishengir/Dialect/Scope/IR/Scope.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -59,6 +60,97 @@ void MapForallToHIVMBlocks::getEffects(
   modifiesPayload(effects);
 }
 
+DiagnosedSilenceableFailure HIVMVectorizeElementwiseOp::applyToOne(
+    TransformRewriter &rewriter, Operation *target,
+    ApplyToEachResultList &results, TransformState &state) {
+  auto module = dyn_cast<ModuleOp>(target);
+  if (!module)
+    return emitDefiniteFailure("expected a module");
+  SmallVector<Operation *> work;
+  module.walk([&](Operation *op) {
+    if (isa<hivm::VAddOp, hivm::VMulOp>(op))
+      work.push_back(op);
+  });
+  if (work.empty())
+    return emitSilenceableError("no HIVM elementwise operations selected");
+  auto tensorType = RankedTensorType::get({64}, rewriter.getF32Type());
+  for (Operation *op : work) {
+    bool hasLayout = false;
+    if (auto add = dyn_cast<hivm::VAddOp>(op))
+      hasLayout = !add.getBroadcast().empty() || !add.getTranspose().empty();
+    if (auto mul = dyn_cast<hivm::VMulOp>(op))
+      hasLayout = !mul.getBroadcast().empty() || !mul.getTranspose().empty();
+    if (hasLayout)
+      return emitSilenceableError("broadcast and transpose are not supported");
+    auto parent = op->getParentOfType<func::FuncOp>();
+    if (!parent || parent->hasAttr("hivm.vector_function"))
+      return emitSilenceableError(
+          "expected an elementwise operation outside a vector function");
+    if (op->getNumOperands() != 3 || op->getNumResults() != 1 ||
+        op->getResult(0).getType() != tensorType ||
+        llvm::any_of(op->getOperandTypes(),
+                     [&](Type type) { return type != tensorType; }))
+      return emitSilenceableError(
+          "expected identical tensor<64xf32> operands and result");
+  }
+  unsigned suffix = 0;
+  for (Operation *op : work) {
+    std::string name;
+    do {
+      name = "__hivm_elementwise_" + std::to_string(suffix++);
+    } while (module.lookupSymbol(name));
+    rewriter.setInsertionPointToEnd(module.getBody());
+    auto function = rewriter.create<func::FuncOp>(
+        op->getLoc(), name,
+        rewriter.getFunctionType({tensorType, tensorType, tensorType},
+                                 {tensorType}));
+    function->setAttr("hivm.vector_function", rewriter.getUnitAttr());
+    function->setAttr("no_inline", rewriter.getUnitAttr());
+    auto *body = function.addEntryBlock();
+    rewriter.setInsertionPointToStart(body);
+    auto loc = op->getLoc();
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value padding =
+        rewriter.create<arith::ConstantOp>(loc, rewriter.getF32FloatAttr(0));
+    auto vectorType = VectorType::get({64}, rewriter.getF32Type());
+    auto read = [&](Value input) -> Value {
+      return rewriter.create<vector::TransferReadOp>(
+          loc, vectorType, input, ValueRange{zero},
+          rewriter.getMultiDimIdentityMap(1), padding, Value(),
+          rewriter.getBoolArrayAttr({true}));
+    };
+    Value lhs = read(body->getArgument(0));
+    Value rhs = read(body->getArgument(1));
+    Value value;
+    if (isa<hivm::VAddOp>(op))
+      value = rewriter.create<arith::AddFOp>(loc, lhs, rhs);
+    else
+      value = rewriter.create<arith::MulFOp>(loc, lhs, rhs);
+    Value tensor =
+        rewriter
+            .create<vector::TransferWriteOp>(
+                loc, TypeRange{tensorType}, value, body->getArgument(2),
+                ValueRange{zero}, rewriter.getMultiDimIdentityMap(1), Value(),
+                rewriter.getBoolArrayAttr({true}))
+            .getResult();
+    rewriter.create<func::ReturnOp>(loc, tensor);
+    rewriter.setInsertionPoint(op);
+    auto call = rewriter.create<func::CallOp>(loc, function, op->getOperands());
+    call->setAttr("hivm.vector_function", rewriter.getUnitAttr());
+    call->setAttr("no_inline", rewriter.getUnitAttr());
+    rewriter.replaceOp(op, call.getResults());
+  }
+  results.push_back(module);
+  return DiagnosedSilenceableFailure::success();
+}
+
+void HIVMVectorizeElementwiseOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  consumesHandle(getTargetMutable(), effects);
+  producesHandle(getOperation()->getOpResults(), effects);
+  modifiesPayload(effects);
+}
+
 //===----------------------------------------------------------------------===//
 // Transform op registration
 //===----------------------------------------------------------------------===//
@@ -82,6 +174,7 @@ public:
     declareGeneratedDialect<memref::MemRefDialect>();
     declareGeneratedDialect<tensor::TensorDialect>();
     declareGeneratedDialect<vector::VectorDialect>();
+    declareGeneratedDialect<func::FuncDialect>();
 
     registerTransformOps<
 #define GET_OP_LIST

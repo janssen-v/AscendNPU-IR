@@ -246,3 +246,42 @@ To rerun a saved candidate, use the `evaluate.py` command above with the demo's
 directory. A no-op recipe validates the machinery only; it is not optimization
 evidence. Moving across machines requires compatible declared dependencies and
 identical compiler binaries, or recreating the bundles on the new host.
+
+## First vectorization replacement experiment
+
+Set `NPUIR_ELEMENTWISE=1` on the single-command script, or pass
+`--elementwise-recipe` to `demo.py`. The baseline uses HFusion's existing
+vectorizer. The candidate starts from mathematically corresponding tensor HIVM
+and uses `examples/elementwise.mlir` at the pre-vectorization checkpoint. The
+checkpoints differ intentionally: compare end-to-end outcomes for the same
+addition, not identical IR prefixes. The no-op demo remains the default.
+
+The initial trusted primitive `transform.hivm.vectorize_elementwise` accepts a
+module containing tensor add/multiply operations with identical `tensor<64xf32>`
+operands/results. It validates all selected operations before rewriting,
+creates outlined vector functions, and does not reassociate arithmetic.
+Broadcasting, transpose annotations, other sizes/dtypes and operations already
+inside vector functions are rejected. This is the first constrained research
+primitive, not general vectorization or an agent search algorithm.
+
+The coordinator's `create --replace-vectorization` records explicit replacement.
+It forwards `--hivm-replace-vectorization` to the driver or
+`replace-vectorization=true` to the opt pipeline. This skips the built-in HIVM
+vectorization stage and requires an external recipe. The transactional worker
+rejects candidates retaining deferred markers or tensor HIVM add/multiply work.
+Existing default/additive paths remain unchanged. Existing HFusion selection
+still determines which frontend operations are deferred to HIVM.
+
+The replacement add demo and its HFusion baseline both produce linked device
+ELFs locally. Add/multiply lowering, unsupported shapes, missing/incomplete
+recipes and driver LLVM replay are covered by lit tests. This is structural and
+binary-generation evidence only: numerical equivalence and timing on the NPU
+remain to be measured with the evaluator.
+
+Final validation after adding replacement routing: all four focused lit entries
+passed (including 18 coordinator tests and 11 evaluator tests), all 25 transaction
+unit tests passed, and `check-bishengir` found 1388 tests: 1236 passed, 136
+unsupported and exactly the same 16 documented baseline failures. Both no-op and
+replacement demo variants produced linked binaries. The existing-build shell
+entry point was exercised through retained ACL failure reports; fresh-machine
+bootstrap still depends on the listed system prerequisites.

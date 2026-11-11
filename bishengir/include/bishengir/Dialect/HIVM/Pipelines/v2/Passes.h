@@ -36,6 +36,11 @@ struct V2PipelineOptions : public mlir::PassPipelineOptions<V2PipelineOptions> {
       *this, "recipe-entry", llvm::cl::desc("Transform named sequence entry"),
       llvm::cl::init("__transform_main")};
 
+  PassOptions::Option<bool> replaceVectorization{
+      *this, "replace-vectorization",
+      llvm::cl::desc("Require the recipe to replace selected vectorization"),
+      llvm::cl::init(false)};
+
   /// Append the device spec from `target` (bishengir-opt only).
   PassOptions::Option<bool> setTargetSpec{
       *this, "set-target-spec",
@@ -53,7 +58,9 @@ struct V2PipelineOptions : public mlir::PassPipelineOptions<V2PipelineOptions> {
 };
 
 /// Apply an external named sequence transactionally at the tensor boundary.
-std::unique_ptr<Pass> createExternalRecipePass(StringRef path, StringRef entry);
+std::unique_ptr<Pass>
+createExternalRecipePass(StringRef path, StringRef entry,
+                         bool replaceVectorization = false);
 /// Stamp or validate/consume a serialized pre-vectorization checkpoint.
 std::unique_ptr<Pass> createPreVectorizeCheckpointPass(StringRef target,
                                                        bool consume,

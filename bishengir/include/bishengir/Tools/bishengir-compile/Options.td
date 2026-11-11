@@ -138,6 +138,11 @@ def HIVMPreVectorizeRecipe : FeatureControlOptions<
   "std::string", "\"\""
 >;
 
+def HIVMReplaceVectorization : FeatureControlOptions<
+  "Use the external recipe instead of the built-in HIVM vectorization stage.",
+  "bool", "false"
+>;
+
 def HIVMPreVectorizeRecipeEntry : FeatureControlOptions<
   "Named sequence entry for the external pre-vectorization recipe.",
   "std::string", "\"__transform_main\""

@@ -107,9 +107,11 @@ void buildV2VectorizationPhase(OpPassManager &pm,
   if (!options.checkpointOutput.empty())
     pm.addPass(createPreVectorizeCheckpointPass(options.target, false,
                                                 options.checkpointOutput));
-  if (!options.recipe.empty())
-    pm.addPass(createExternalRecipePass(options.recipe, options.recipeEntry));
-  pm.addPass(createHIVMVectorizePass());
+  if (!options.recipe.empty() || options.replaceVectorization)
+    pm.addPass(createExternalRecipePass(options.recipe, options.recipeEntry,
+                                        options.replaceVectorization));
+  if (!options.replaceVectorization)
+    pm.addPass(createHIVMVectorizePass());
 }
 
 /// The tensor -> memref anchor.
