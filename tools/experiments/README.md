@@ -196,3 +196,53 @@ NPU with matching target hardware and repeat independent runs to assess noise.
 Eleven evaluator tests cover correctness gating, warmups/interleaving, malformed
 samples and benchmark errors in addition to the correctness cases. Timing tests
 use explicit fixtures; actual NPU timing remains unvalidated on this server.
+
+## One-command tensor-add demonstration
+
+After cloning `vincent/next/vectorize-v2`, on a matching Ascend 950 NPU host:
+
+```sh
+CANN_ROOT=/path/to/cann/toolkit \
+TOOLCHAIN_BIN=/path/to/cann/tools/bisheng_compiler/bin \
+bash tools/experiments/run-demo.sh /absolute/new-result-directory
+```
+
+The script initializes recorded submodules, configures a release A5 build, builds
+both compiler tools and their dependencies, then runs the demo. It requires Git,
+CMake, Ninja, Clang/LLD, Python 3, CANN 9.3-compatible development/runtime files,
+and the compiler's normal build dependencies. It does not install system packages.
+Use `CMAKE_BUILD_PARALLEL_LEVEL` to set build concurrency (default 4; one linker).
+`NPUIR_BUILD_DIR` selects an existing build; `NPUIR_SKIP_BUILD=1` skips rebuilding.
+`NPUIR_DEVICE` selects the device (default 0). On this server only,
+`NPUIR_SYSROOT=/opt/sysroots/ubuntu-20.04` supplies the documented x86_64 sysroot
+flags. Ordinary compatible Ubuntu NPU hosts should omit that override.
+
+The demo starts from `examples/add.mlir` (64 contiguous f32 elements), uses the
+existing HFusion vectorizer to prepare the baseline, exports a checkpoint, and
+saves baseline and no-op-recipe bundles. Both replay through CANN to linked
+binaries, then run correctness and interleaved timings. All build-root template
+bitcodes are fingerprinted. `demo.json` points into the retained experiment;
+`evaluation/report.json` contains the correctness/performance report. The final
+LLVM entry has exactly three pointer arguments, matching the declared ABI.
+
+On the current NPU-less server, both baseline and candidate compile into linked
+Ascend ELF binaries. The full evaluator retains ACL initialization failures and
+sets `performance_eligible=false`; it does not fabricate correctness or timings.
+The 16-element non-vectorized fixture still exposes the earlier template-link
+failure. The 64-element demo uses the existing vectorization path and is not a
+fix for that baseline issue.
+
+To validate binary generation without attempting device execution:
+
+```sh
+python3 tools/experiments/demo.py --build-dir build_a5 \
+  --toolchain-bin /path/to/bisheng_compiler/bin \
+  --output /tmp/add-compile-only --compile-only
+```
+
+That mode reports `compiled_not_executed`, never successful hardware evaluation.
+To rerun a saved candidate, use the `evaluate.py` command above with the demo's
+`baseline-bundle`, `candidate-bundle` and `evaluation.json`, and a fresh output
+directory. A no-op recipe validates the machinery only; it is not optimization
+evidence. Moving across machines requires compatible declared dependencies and
+identical compiler binaries, or recreating the bundles on the new host.

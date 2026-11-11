@@ -1,0 +1,6 @@
+{
+  "schema_version": 1, "reference": "add", "abi": "three-pointers",
+  "shape": [64], "dtype": "f32", "seeds": [7, 19, 42],
+  "atol": 0.000001, "rtol": 0.00001,
+  "entry": "add", "blocks": 1, "device": 0
+}
