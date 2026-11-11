@@ -101,3 +101,33 @@ The failure paths match the documented baseline in
 The local ownership checker reports no owner for these three files or the new
 lit entry. Confirm intended ownership using workflow 2 in
 `tools/codeowners-check/DEVELOPER.en.md` before submission.
+
+## Compiler-driver adapters (manifest schema 2)
+
+Use `create --adapter driver-llvm --compiler build_a5/bin/bishengir-compile`
+for LLVM output, or `--adapter driver-binary --toolchain-bin /path/to/cann/tools/bisheng_compiler/bin`
+for a linked device object. The toolchain directory is required for binary mode:
+its `bisheng`, `ld.lld`, and optional native backend library are fingerprinted.
+It also sets `BISHENG_INSTALL_PATH` and prepends the toolchain directory to PATH
+so host LLVM's linker cannot accidentally handle an Ascend object.
+
+`--backend-options='-mllvm ...'` records the exact options forwarded through
+`--append-bisheng-options`. Replay preserves recipe entry, target, preload and
+multi-buffer options. Schema 1 bundles must be recreated; they are rejected,
+not silently migrated. Additional template bitcode/configuration dependencies
+can be supplied with `--dependency`.
+
+The driver saves intermediate IR and logs. A successful pure-device run reports
+`candidate` as `intermediates/candidate.ll` or `candidate.o`. Host libraries and
+multi-entry packaging are not yet supported as launchable candidates.
+`preflight_seconds` measures manifest validation and staging;
+`compilation_seconds` measures the isolated driver invocation, separately from
+later evaluation. Native backend trace intervals are reported in
+`compiler_phase_seconds` and retained as `compile-trace.jsonl`; overlapping
+worker phases must not be summed as wall time. Missing/unfinished trace intervals
+are omitted. Process backend runs may not expose native phase intervals.
+
+On this server, real driver LLVM replay and a linked empty AIV kernel have been
+validated. The tensor-add fixture currently reaches object generation but fails
+linking on `_mlir_ciface_vadd_1d_float`; that output is a failed experiment, not
+a runnable binary or an optimization result.

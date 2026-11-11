@@ -13,13 +13,14 @@ import subprocess
 import sys
 import time
 
-SCHEMA = 1
+SCHEMA = 2
 BOUNDARY = "hivm.pre-vectorize"
 # Capture only compiler-related environment, never the whole user environment.
 ENV_KEYS = (
     "PATH", "LD_LIBRARY_PATH", "PYTHONPATH", "TOOLCHAIN_HOME",
     "ASCEND_TOOLKIT_HOME", "ASCEND_OPP_PATH", "ASCEND_AICPU_PATH",
-    "ASCEND_HOME_PATH",
+    "ASCEND_HOME_PATH", "BISHENG_INSTALL_PATH", "BISHENG_BACKEND",
+    "BISHENG_LLC_LIBRARY",
 )
 
 
@@ -58,10 +59,22 @@ def source_identity(repo):
 
 
 def create(bundle, checkpoint, recipe, compiler, repo, target, entry,
-           preload=False, multi_buffer=False, dependency=()):
+           preload=False, multi_buffer=False, dependency=(), adapter="opt",
+           toolchain_bin=None, backend_options=""):
     # Materialize inputs before publishing the manifest. No source paths are
     # needed for replay and subsequent edits to originals cannot change a run.
     compiler = compiler_identity(compiler)
+    if adapter not in ("opt", "driver-llvm", "driver-binary"):
+        raise ValueError("unsupported compiler adapter")
+    dependency = list(dependency)
+    if toolchain_bin:
+        toolchain_bin = Path(toolchain_bin).resolve(strict=True)
+        dependency += [toolchain_bin / "bisheng", toolchain_bin / "ld.lld"]
+        native_library = toolchain_bin.parent / "lib/libbisheng-llc.so"
+        if native_library.exists():
+            dependency.append(native_library)
+    if adapter == "driver-binary" and not toolchain_bin:
+        raise ValueError("binary replay requires --toolchain-bin")
     if not re.fullmatch(r"[A-Za-z0-9_]+", target):
         raise ValueError("invalid target")
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", entry):
@@ -70,9 +83,13 @@ def create(bundle, checkpoint, recipe, compiler, repo, target, entry,
     library = Path(recipe).read_bytes() if recipe else None
     source = source_identity(repo)
     environment = {key: os.environ[key] for key in ENV_KEYS if key in os.environ}
+    if toolchain_bin:
+        environment["BISHENG_INSTALL_PATH"] = str(toolchain_bin)
+        environment["PATH"] = str(toolchain_bin) + os.pathsep + environment.get("PATH", "")
     environment.update({"LC_ALL": "C", "LANG": "C", "TZ": "UTC"})
     manifest = {
         "schema_version": SCHEMA, "boundary": BOUNDARY,
+        "adapter": adapter, "backend_options": backend_options,
         "compiler": compiler, "source": source, "environment": environment,
         "dependencies": {str(Path(p).resolve(strict=True)): digest(Path(p).read_bytes())
                          for p in dependency},
@@ -103,8 +120,15 @@ def validate(bundle, compiler):
     if manifest.get("schema_version") != SCHEMA or manifest.get("boundary") != BOUNDARY:
         raise ValueError("incompatible manifest schema or checkpoint boundary")
     if set(manifest) != {"schema_version", "boundary", "compiler", "source",
-                         "environment", "pipeline", "inputs", "experiment_id", "dependencies"}:
+                         "environment", "pipeline", "inputs", "experiment_id", "dependencies",
+                         "adapter", "backend_options"}:
         raise ValueError("unsupported manifest fields")
+    if manifest["adapter"] not in ("opt", "driver-llvm", "driver-binary"):
+        raise ValueError("unsupported compiler adapter")
+    if not isinstance(manifest["backend_options"], str) or "\0" in manifest["backend_options"]:
+        raise ValueError("invalid backend options")
+    if manifest["adapter"] == "opt" and manifest["backend_options"]:
+        raise ValueError("opt adapter cannot accept backend options")
     if not isinstance(manifest["compiler"], dict):
         raise ValueError("invalid compiler identity")
     dependencies = manifest["dependencies"]
@@ -143,6 +167,50 @@ def validate(bundle, compiler):
     return manifest, actual
 
 
+def trace_timings(path):
+    """Retain matched intervals; concurrent phases must not be summed as wall time."""
+    starts = {}
+    intervals = []
+    for line in path.read_text().splitlines():
+        try:
+            event = json.loads(line)
+            key = (event["run_id"], event["tid"], event["lane"], event["phase"])
+            if event["event"] == "begin":
+                starts.setdefault(key, []).append(event["time_ns"])
+            elif event["event"] == "end" and starts.get(key):
+                begin = starts[key].pop()
+                intervals.append({"lane": event["lane"], "phase": event["phase"],
+                                  "seconds": (event["time_ns"] - begin) / 1e9})
+        except (ValueError, KeyError, TypeError):
+            # Interrupted trace writes are retained raw, never invented as timings.
+            continue
+    return intervals
+
+
+def run_process(command, output, environment, timeout):
+    """Run a compiler or evaluator with process-group lifetime containment."""
+    start = time.monotonic()
+    result = {"status": "error"}
+    with (output / "stdout.log").open("wb") as stdout, (output / "stderr.log").open("wb") as stderr:
+        process = subprocess.Popen(command, cwd=output, env=environment,
+                                   stdin=subprocess.DEVNULL, stdout=stdout,
+                                   stderr=stderr, start_new_session=True)
+        try:
+            code = process.wait(timeout=timeout)
+            result["status"] = "success" if code == 0 else "crash" if code < 0 else "failed"
+        except subprocess.TimeoutExpired:
+            result["status"] = "timeout"
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+        result["returncode"] = process.returncode
+    result["process_seconds"] = time.monotonic() - start
+    return result
+
+
 def replay(bundle, output, compiler=None, timeout=60):
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout must be finite and positive")
@@ -172,32 +240,43 @@ def replay(bundle, output, compiler=None, timeout=60):
         command = [actual["path"], "checkpoint.bc",
                    "--hivm-v2-replay-pre-vectorize=" + " ".join(options),
                    "-o", "candidate.mlir"]
+        adapter = manifest["adapter"]
+        expected_output = "candidate.mlir"
+        if adapter != "opt":
+            expected_output = "intermediates/candidate.ll" if adapter == "driver-llvm" else "candidate.o"
+            command = [actual["path"], "checkpoint.bc", "--target=" + p["target"],
+                       "--use-pipeline-version=2", "--hivm-replay-pre-vectorize",
+                       "--enable-preload=" + str(p["enable_preload"]).lower(),
+                       "--enable-auto-multi-buffer=" + str(p["enable_multi_buffer"]).lower(),
+                       "--enable-lir-compile=" + str(adapter == "driver-binary").lower(),
+                       "--save-temps=intermediates", "-o", "candidate"]
+            if "recipe.mlir" in manifest["inputs"]:
+                command += ["--hivm-pre-vectorize-recipe=recipe.mlir",
+                            "--hivm-pre-vectorize-recipe-entry=" + p["entry"]]
+            if manifest["backend_options"]:
+                command += ["--append-bisheng-options=" + manifest["backend_options"]]
         result.update(experiment_id=manifest["experiment_id"], command=command,
                       compiler=actual, status="error")
-        with (output / "stdout.log").open("wb") as stdout, (output / "stderr.log").open("wb") as stderr:
-            process = subprocess.Popen(command, cwd=output, env=manifest["environment"],
-                                       stdin=subprocess.DEVNULL, stdout=stdout,
-                                       stderr=stderr, start_new_session=True)
-            try:
-                code = process.wait(timeout=timeout)
-                result["status"] = "success" if code == 0 else "crash" if code < 0 else "failed"
-            except subprocess.TimeoutExpired:
-                result["status"] = "timeout"
-            finally:
-                # Also terminate descendants retaining files after the leader exits.
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                process.wait()
-            result["returncode"] = process.returncode
-        candidate = output / "candidate.mlir"
+        result["preflight_seconds"] = time.monotonic() - start
+        environment = dict(manifest["environment"])
+        if adapter != "opt":
+            result["environment_overrides"] = {
+                "BISHENG_ASYNC_TRACE": "1", "BISHENG_ASYNC_TRACE_FILE": "compile-trace.jsonl"}
+            environment.update(result["environment_overrides"])
+        execution = run_process(command, output, environment, timeout)
+        result.update(execution)
+        result["compilation_seconds"] = execution["process_seconds"]
+        trace = output / "compile-trace.jsonl"
+        if trace.is_file():
+            result["compiler_phase_seconds"] = trace_timings(trace)
+        candidate = output / expected_output
         if result["status"] == "success" and not candidate.is_file():
             result.update(status="error", diagnostic="compiler produced no candidate")
-        for name in ("stdout.log", "stderr.log", "candidate.mlir"):
-            path = output / name
-            if path.is_file():
-                result["artifacts"][name] = digest(path.read_bytes())
+        if result["status"] == "success":
+            result["candidate"] = expected_output
+        for path in sorted(output.rglob("*")):
+            if path.is_file() and path.name not in ("manifest.json", "result.json"):
+                result["artifacts"][str(path.relative_to(output))] = digest(path.read_bytes())
     except (ValueError, KeyError, TypeError, OSError) as error:
         result["diagnostic"] = str(error)
     finally:
@@ -217,6 +296,9 @@ def main():
     create_parser.add_argument("--dependency", action="append", type=Path, default=[],
                                help="Runtime library or toolchain file to fingerprint; repeatable")
     create_parser.add_argument("--compiler", required=True, type=Path)
+    create_parser.add_argument("--adapter", choices=("opt", "driver-llvm", "driver-binary"), default="opt")
+    create_parser.add_argument("--toolchain-bin", type=Path)
+    create_parser.add_argument("--backend-options", default="")
     create_parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[2])
     create_parser.add_argument("--target", default="Ascend950PR_9579")
     create_parser.add_argument("--entry", default="__transform_main")

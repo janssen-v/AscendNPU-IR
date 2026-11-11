@@ -172,6 +172,36 @@ class ReplayTests(unittest.TestCase):
         result = json.loads((self.root / "cli-run/result.json").read_text())
         self.assertEqual(result["status"], "success")
 
+    def test_driver_adapter(self):
+        self.compiler.write_text(
+            "#!/usr/bin/python3\nimport sys\nfrom pathlib import Path\n"
+            "assert '--hivm-replay-pre-vectorize' in sys.argv\n"
+            "assert '--enable-lir-compile=false' in sys.argv\n"
+            "Path('intermediates').mkdir()\n"
+            "Path('intermediates/candidate.ll').write_text('LLVM output')\n"
+            "Path('intermediates/payload.mlir').write_text('IR')\n"
+        )
+        with patch.object(experiment, "source_identity", return_value={}):
+            experiment.create(self.bundle, self.checkpoint, self.recipe, self.compiler,
+                              self.root, "Ascend950PR_9579", "__transform_main",
+                              adapter="driver-llvm", backend_options="-mllvm -example=false")
+        result = self.run_replay()
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["candidate"], "intermediates/candidate.ll")
+        self.assertIn("intermediates/payload.mlir", result["artifacts"])
+        self.assertGreater(result["compilation_seconds"], 0)
+        self.assertGreater(result["preflight_seconds"], 0)
+        self.assertIn("--append-bisheng-options=-mllvm -example=false", result["command"])
+
+    def test_trace_intervals(self):
+        trace = self.root / "trace.jsonl"
+        event = {"run_id": "r", "tid": 1, "lane": "AIV", "phase": "compile"}
+        trace.write_text("\n".join(json.dumps(dict(event, event=kind, time_ns=t))
+                                   for kind, t in (("begin", 10), ("end", 1000000010)))
+                         + '\n{"partial":')
+        self.assertEqual(experiment.trace_timings(trace),
+                         [{"lane": "AIV", "phase": "compile", "seconds": 1.0}])
+
     def test_missing_output(self):
         self.compiler.write_text("#!/usr/bin/python3\n")
         self.create()
@@ -216,6 +246,15 @@ class ReplayTests(unittest.TestCase):
                        cwd=self.bundle, check=True)
         self.assertEqual(experiment.digest(direct.read_bytes()),
                          first["artifacts"]["candidate.mlir"])
+        driver = self.compiler.with_name("bishengir-compile")
+        driver_bundle = self.root / "driver-bundle"
+        with patch.object(experiment, "source_identity", return_value={}):
+            experiment.create(driver_bundle, self.checkpoint, self.recipe, driver,
+                              self.root, "Ascend950PR_9579", "__transform_main",
+                              adapter="driver-llvm")
+        driver_result = experiment.replay(driver_bundle, self.root / "driver-run")
+        self.assertEqual(driver_result["status"], "success", driver_result)
+        self.assertIn("define", (self.root / "driver-run/intermediates/candidate.ll").read_text())
         # A well-formed manifest cannot override the compiler's checkpoint marker.
         m = json.loads((self.bundle / "manifest.json").read_text())
         m["pipeline"]["target"] = "Ascend960"
