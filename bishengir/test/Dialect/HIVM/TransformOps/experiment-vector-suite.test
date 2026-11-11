@@ -1,0 +1,2 @@
+# REQUIRES: system-linux
+# RUN: %python %bishengir_src_root/../tools/experiments/vector_suite/test_suite.py

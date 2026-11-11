@@ -487,3 +487,12 @@ were weakened or disabled. Full-suite success remains outstanding.
 The six new experiment/recipe/test files currently have no CODEOWNERS match.
 Confirm intended ownership using workflow 2 in
 `tools/codeowners-check/DEVELOPER.en.md` before submission.
+
+## Twelve-kernel suite
+
+`vector_suite/` contains three implemented Triton kernels in each of the
+contiguous elementwise, broadcast, reduction/normalization and layout/strided
+families. It provides seeded PyTorch references, aligned/tail profiles, isolated
+validation, shared checkpoint capture, per-kernel recipe slots, and optional
+correctness-gated replay comparisons. See [the suite guide](vector_suite/README.md)
+for the kernel inventory, commands, explicit transform coverage and results.
