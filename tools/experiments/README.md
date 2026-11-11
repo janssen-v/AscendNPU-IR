@@ -131,3 +131,47 @@ On this server, real driver LLVM replay and a linked empty AIV kernel have been
 validated. The tensor-add fixture currently reaches object generation but fails
 linking on `_mlir_ciface_vadd_1d_float`; that output is a failed experiment, not
 a runnable binary or an optimization result.
+
+## Correctness evaluation
+
+The initial evaluator supports one explicit ABI: three device pointers in order
+`lhs, rhs, output`, contiguous f32 tensors of the declared shape, no workspace
+or hidden arguments. It uses two independent correctness runs (baseline and
+candidate), each isolated in a disposable ACL subprocess. Both must pass against
+the reference before `performance_eligible` becomes true. The reference rounds
+seeded inputs to f32, adds with Python scalar arithmetic, then rounds to f32.
+Input values are finite uniform samples in [-1, 1]; these tests do not prove
+correctness for all inputs or special floating-point values.
+
+Example evaluation specification:
+
+```json
+{
+  "schema_version": 1, "reference": "add", "abi": "three-pointers",
+  "shape": [16], "dtype": "f32", "seeds": [7, 19],
+  "atol": 0.000001, "rtol": 0.00001,
+  "entry": "add", "blocks": 1, "device": 0
+}
+```
+
+On the NPU host with its CANN runtime environment initialized:
+
+```sh
+python3 tools/experiments/evaluate.py \
+  --baseline /path/to/baseline-bundle --candidate /path/to/candidate-bundle \
+  --specification evaluation.json --output /tmp/evaluation-1 \
+  --acl-library "$ASCEND_HOME_PATH/lib64/libascendcl.so"
+```
+
+The coordinator compiles both saved bundles through the driver, then launches
+only successful binary artifacts. It records the specification, runner/library
+hashes, input/reference/output bytes, mismatch locations, execution errors and
+separate compilation/execution costs in `report.json`. Missing outputs, wrong
+sizes and nonfinite values fail correctness. The tolerances use
+`abs(actual-reference) <= atol + rtol*abs(reference)`.
+
+Eight evaluation tests cover reproducible inputs, both verdicts, retained
+mismatches, compiler errors, execution crashes/timeouts and invalid specs. They
+use subprocess fixtures and do not claim NPU execution. The actual ACL library
+on this server loads but reports `aclInit` error 500000; no hardware execution
+has been validated here.
