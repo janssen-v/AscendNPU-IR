@@ -175,3 +175,24 @@ mismatches, compiler errors, execution crashes/timeouts and invalid specs. They
 use subprocess fixtures and do not claim NPU execution. The actual ACL library
 on this server loads but reports `aclInit` error 500000; no hardware execution
 has been validated here.
+
+## Correctness-gated NPU measurements
+
+The evaluation command now benchmarks only after both correctness runs pass.
+`--warmups 5 --rounds 20 --iterations 10` controls untimed warmup launches and
+interleaved measurements. Round order alternates baseline/candidate and
+candidate/baseline. Each sample uses ACL timeline events around a batch of kernel
+launches and synchronizes the stream before reading event elapsed time; allocation,
+file IO and host-to-device copies occur before measurement. Reported milliseconds
+are batch event time divided by iterations, including device scheduling gaps.
+
+Raw samples are updated after each measurement and survive later failures.
+The report retains them alongside each median and baseline/candidate median
+ratio. A ratio is a measured comparison, not a significance test or a claim of
+optimization. Zero, nonfinite, missing and misordered samples are rejected.
+Runtime or benchmark failure never yields a performance comparison. Use an idle
+NPU with matching target hardware and repeat independent runs to assess noise.
+
+Eleven evaluator tests cover correctness gating, warmups/interleaving, malformed
+samples and benchmark errors in addition to the correctness cases. Timing tests
+use explicit fixtures; actual NPU timing remains unvalidated on this server.

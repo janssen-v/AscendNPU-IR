@@ -9,6 +9,7 @@ from pathlib import Path
 import platform
 import random
 import struct
+import statistics
 import sys
 import time
 
@@ -85,10 +86,29 @@ def compare(expected, actual, atol, rtol):
     return {"passed": total == 0, "mismatch_count": total, "mismatches": mismatches}
 
 
+def summarize_samples(samples, rounds):
+    expected = [(i, label) for i in range(rounds)
+                for label in (("baseline", "candidate") if i % 2 == 0 else ("candidate", "baseline"))]
+    if not isinstance(samples, list) or len(samples) != len(expected):
+        raise ValueError("incomplete timing samples")
+    for sample, (index, label) in zip(samples, expected):
+        if (sample.get("round") != index or sample.get("variant") != label
+                or type(sample.get("milliseconds")) not in (float, int)
+                or not math.isfinite(sample["milliseconds"]) or sample["milliseconds"] <= 0):
+            raise ValueError("invalid timing sample or interleaving order")
+    medians = {label: statistics.median(s["milliseconds"] for s in samples if s["variant"] == label)
+               for label in ("baseline", "candidate")}
+    return {"samples": samples, "median_milliseconds": medians,
+            "baseline_over_candidate": medians["baseline"] / medians["candidate"]}
+
+
 def evaluate(baseline, candidate, specification, output, acl_library,
-             timeout=120, runner=None):
+             timeout=120, runner=None, warmups=5, rounds=20, iterations=10):
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout must be finite and positive")
+    if any(type(v) is not int or v < lower or v > 100000
+           for v, lower in ((warmups, 0), (rounds, 2), (iterations, 1))):
+        raise ValueError("invalid benchmark configuration")
     output = Path(output).resolve()
     for bundle in (baseline, candidate):
         bundle = Path(bundle).resolve()
@@ -140,6 +160,28 @@ def evaluate(baseline, candidate, specification, output, acl_library,
         passed = all(v["passed"] for v in report["correctness"].values())
         report.update(status="correct" if passed else "incorrect_or_execution_failed",
                       performance_eligible=passed)
+        if passed:
+            benchmark_dir = output / "benchmark"
+            benchmark_dir.mkdir()
+            request = {"mode": "benchmark", "acl_library": str(library),
+                       "device": spec["device"], "entry": spec["entry"],
+                       "blocks": spec["blocks"], "bytes": math.prod(spec["shape"]) * 4,
+                       "binaries": {label: str(output / (label + "-compile/candidate.o"))
+                                    for label in ("baseline", "candidate")},
+                       "inputs": cases[0]["inputs"], "warmups": warmups,
+                       "rounds": rounds, "iterations": iterations,
+                       "samples": str(benchmark_dir / "samples.json")}
+            write_json(benchmark_dir / "request.json", request)
+            execution = run_process([sys.executable, str(runner), "--request", "request.json"],
+                                    benchmark_dir, dict(os.environ), timeout)
+            report["benchmark"] = {"execution": execution, "warmups": warmups,
+                                   "rounds": rounds, "iterations": iterations,
+                                   "clock": "ACL timeline events", "unit": "milliseconds per launch"}
+            report["status"] = "benchmark_failed"
+            if execution["status"] == "success":
+                samples = json.loads((benchmark_dir / "samples.json").read_text())
+                report["benchmark"].update(summarize_samples(samples, rounds))
+                report["status"] = "success"
     except (ValueError, KeyError, TypeError, OSError) as error:
         report["diagnostic"] = str(error)
     finally:
@@ -158,11 +200,14 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--acl-library", required=True, type=Path)
     parser.add_argument("--timeout", type=float, default=120)
+    parser.add_argument("--warmups", type=int, default=5)
+    parser.add_argument("--rounds", type=int, default=20)
+    parser.add_argument("--iterations", type=int, default=10)
     args = vars(parser.parse_args())
     try:
         report = evaluate(**args)
         print(json.dumps(report, sort_keys=True))
-        return 0 if report["status"] == "correct" else 1
+        return 0 if report["status"] == "success" else 1
     except (ValueError, OSError) as error:
         print(str(error), file=sys.stderr)
         return 1

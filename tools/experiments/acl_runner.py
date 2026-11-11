@@ -4,6 +4,7 @@
 import argparse
 import ctypes as C
 import json
+import math
 from pathlib import Path
 import sys
 
@@ -30,6 +31,9 @@ class ACL:
             "aclrtBinaryUnLoad": [p],
             "aclrtBinaryGetFunction": [p, C.c_char_p, pp],
             "aclrtLaunchKernel": [p, C.c_uint32, p, C.c_size_t, p],
+            "aclrtCreateEventWithFlag": [pp, C.c_uint32],
+            "aclrtDestroyEvent": [p], "aclrtRecordEvent": [p, p],
+            "aclrtEventElapsedTime": [C.POINTER(C.c_float), p, p],
         }
         for name, args in self.signatures.items():
             fn = getattr(self.lib, name)
@@ -66,11 +70,33 @@ class ACL:
         self.call("aclrtBinaryGetFunction", handle, entry.encode(), C.byref(function))
         return function
 
-    def launch(self, function, pointers, blocks):
+    def launch(self, function, pointers, blocks, synchronize=True):
         arguments = (C.c_void_p * len(pointers))(*(p.value for p in pointers))
         self.call("aclrtLaunchKernel", function, blocks, arguments,
                   C.sizeof(arguments), self.stream)
-        self.call("aclrtSynchronizeStream", self.stream)
+        if synchronize:
+            self.call("aclrtSynchronizeStream", self.stream)
+
+    def measure(self, function, pointers, blocks, iterations):
+        events = []
+        try:
+            for _ in range(2):
+                event = C.c_void_p()
+                self.call("aclrtCreateEventWithFlag", C.byref(event), 8)
+                events.append(event)
+            self.call("aclrtRecordEvent", events[0], self.stream)
+            for _ in range(iterations):
+                self.launch(function, pointers, blocks, synchronize=False)
+            self.call("aclrtRecordEvent", events[1], self.stream)
+            self.call("aclrtSynchronizeStream", self.stream)
+            elapsed = C.c_float()
+            self.call("aclrtEventElapsedTime", C.byref(elapsed), *events)
+            if not math.isfinite(elapsed.value) or elapsed.value <= 0:
+                raise RuntimeError("invalid or unresolved ACL event timing")
+            return elapsed.value / iterations
+        finally:
+            for event in events:
+                self.lib.aclrtDestroyEvent(event)
 
     def read(self, pointer, size):
         host = C.create_string_buffer(size)
@@ -97,9 +123,36 @@ class ACL:
             self.lib.aclFinalize()
 
 
+def benchmark(runtime, request):
+    functions, pointers = {}, {}
+    lhs, rhs = (Path(p).read_bytes() for p in request["inputs"])
+    if len(lhs) != len(rhs) or len(lhs) != request["bytes"]:
+        raise ValueError("benchmark input sizes do not match ABI")
+    for label in ("baseline", "candidate"):
+        functions[label] = runtime.load(Path(request["binaries"][label]), request["entry"])
+        pointers[label] = [runtime.allocate(lhs), runtime.allocate(rhs),
+                           runtime.allocate(b"\xff" * len(lhs))]
+    for _ in range(request["warmups"]):
+        for label in ("baseline", "candidate"):
+            runtime.launch(functions[label], pointers[label], request["blocks"])
+    samples = []
+    for round_index in range(request["rounds"]):
+        order = ("baseline", "candidate") if round_index % 2 == 0 else ("candidate", "baseline")
+        for label in order:
+            milliseconds = runtime.measure(functions[label], pointers[label],
+                                           request["blocks"], request["iterations"])
+            samples.append({"round": round_index, "variant": label, "milliseconds": milliseconds})
+            # Incremental raw samples survive a later device error or timeout.
+            Path(request["samples"]).write_text(json.dumps(samples) + "\n")
+    return samples
+
+
 def run(request):
     runtime = ACL(request["acl_library"], request["device"])
     try:
+        if request.get("mode") == "benchmark":
+            benchmark(runtime, request)
+            return
         function = runtime.load(Path(request["binary"]), request["entry"])
         for case in request["cases"]:
             lhs, rhs = (Path(p).read_bytes() for p in case["inputs"])

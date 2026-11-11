@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 import evaluate
+import acl_runner
 
 
 class EvaluationTests(unittest.TestCase):
@@ -23,6 +24,12 @@ class EvaluationTests(unittest.TestCase):
         self.runner.write_text('''import json, struct
 from pathlib import Path
 r = json.loads(Path('request.json').read_text())
+if r.get('mode') == 'benchmark':
+ samples = [{'round': i, 'variant': label, 'milliseconds': 1.0}
+            for i in range(r['rounds']) for label in
+            (('baseline', 'candidate') if i % 2 == 0 else ('candidate', 'baseline'))]
+ Path(r['samples']).write_text(json.dumps(samples))
+ raise SystemExit(0)
 for c in r['cases']:
  a, b = [list(struct.iter_unpack('<f', Path(p).read_bytes())) for p in c['inputs']]
  Path(c['output']).write_bytes(b''.join(struct.pack('<f', x[0]+y[0]) for x,y in zip(a,b)))
@@ -42,7 +49,7 @@ for c in r['cases']:
 
     def test_correct_baseline_candidate(self):
         result = self.run_evaluation()
-        self.assertEqual(result["status"], "correct")
+        self.assertEqual(result["status"], "success")
         self.assertTrue(result["performance_eligible"])
         for label in ("baseline", "candidate"):
             self.assertEqual(len(result["correctness"][label]["cases"]), 2)
@@ -52,6 +59,7 @@ for c in r['cases']:
         self.runner.write_text(self.runner.read_text().replace('x[0]+y[0]', 'x[0]-y[0]'))
         result = self.run_evaluation()
         self.assertFalse(result["performance_eligible"])
+        self.assertFalse((self.root / "report/benchmark").exists())
         self.assertGreater(result["correctness"]["candidate"]["cases"][0]["mismatch_count"], 0)
         self.assertTrue((self.root / "report/candidate-execute/output-0.bin").is_file())
 
@@ -84,6 +92,38 @@ for c in r['cases']:
         spec["atol"] = -1
         self.spec.write_text(json.dumps(spec))
         self.assertEqual(self.run_evaluation()["status"], "error")
+
+    def test_benchmark_failure(self):
+        self.runner.write_text(self.runner.read_text().replace("raise SystemExit(0)", "raise SystemExit(2)"))
+        result = self.run_evaluation()
+        self.assertTrue(result["performance_eligible"])
+        self.assertEqual(result["status"], "benchmark_failed")
+        self.assertNotIn("baseline_over_candidate", result["benchmark"])
+
+    def test_invalid_samples(self):
+        with self.assertRaises(ValueError):
+            evaluate.summarize_samples([], 2)
+        with self.assertRaises(ValueError):
+            evaluate.summarize_samples([{"round": 0, "variant": "baseline", "milliseconds": float('nan')}] * 4, 2)
+
+    def test_benchmark_warmup_and_order(self):
+        inputs = [self.root / "lhs", self.root / "rhs"]
+        for p in inputs:
+            p.write_bytes(evaluate.pack([1]))
+        from unittest.mock import Mock
+        runtime = Mock()
+        runtime.load.side_effect = lambda path, entry: str(path)
+        runtime.measure.return_value = 1.0
+        request = {"inputs": inputs, "bytes": 4,
+                   "binaries": {"baseline": "baseline", "candidate": "candidate"},
+                   "entry": "add", "blocks": 1, "warmups": 3,
+                   "rounds": 2, "iterations": 10, "samples": self.root / "samples.json"}
+        samples = acl_runner.benchmark(runtime, request)
+        self.assertEqual(runtime.launch.call_count, 6)
+        self.assertEqual([s["variant"] for s in samples],
+                         ["baseline", "candidate", "candidate", "baseline"])
+        self.assertEqual([c.args[0] for c in runtime.measure.call_args_list],
+                         ["baseline", "candidate", "candidate", "baseline"])
 
     def test_inputs_reproducible(self):
         spec = evaluate.load_spec(self.spec)
