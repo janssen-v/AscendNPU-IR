@@ -387,3 +387,103 @@ until vectorization effects can be separated from cube scheduling and networking
 Use longer kernels or device-side replay for timing, repeated independent runs,
 and include zeros, extreme values, NaNs/infinities and dtype-specific tolerances
 in addition to the current finite random-input smoke tests.
+
+## Shared-checkpoint Triton fused experiment
+
+`triton_fused.py` compiles `examples/fused_elementwise.py`, a tiled f32
+`y = a * b + a` kernel, through the installed Triton-Ascend frontend. It validates
+both replay binaries against an independent PyTorch CPU reference. This is a
+comparison of vectorization choices within one common v2 suffix, not a comparison
+of the complete production v1 and v2 pipelines.
+
+```sh
+source /root/cann-9.2.0-beta2/cann/set_env.sh
+python3 tools/experiments/triton_fused.py \
+  --build-dir build_a5 \
+  --toolchain-bin /root/cann-9.2.0-beta2/cann/tools/bisheng_compiler/bin \
+  --output /root/dev/new-fused-experiment
+```
+
+Run from this checkout. Required packages are PyTorch, torch_npu, and
+Triton-Ascend; the integration was tested with the installed Triton-Ascend 3.6.0
+fork on `npu-s5-docker`. The adapter explicitly selects this checkout's compiler
+and uses a private frontend cache. It relies on that fork's compiler/launcher
+APIs and records the frontend adapter hash and package versions. It does not
+install packages or modify the frontend checkout.
+
+The command:
+
+1. Captures the Triton TTIR/adapter IR, kernel source and launch metadata.
+2. Runs frontend normalization with HFusion vectorization explicitly disabled,
+   saves one `hivm.pre-vectorize` checkpoint, and requires successful capture.
+3. Creates two manifests referencing byte-identical checkpoints. The baseline
+   recipe `original-vectorizer.mlir` converts HIVM vector operations back to
+   HFusion, invokes the original `hfusion-auto-vectorize` pass, outlines vector
+   functions and converts back. The default candidate uses `elementwise.mlir`.
+   Both use the same compiler, template bitcode, backend flags and v2 suffix.
+4. Checks the LLVM entry ABI, loads both resulting binaries with Triton's native
+   loader, and launches with identical metadata and logical grids. It does not
+   use the three-pointer demonstration runner: Triton adds workspace and grid
+   arguments. The supported ABI is five pointers followed by three i32 values.
+5. Checks both variants for every shape and seed before timing either variant.
+   It saves inputs, PyTorch references, actual outputs, mismatch counts and
+   maximum errors as well as LLVM/HIVM diffs. Measurements use NPU events,
+   alternating AB/BA order, and retained raw samples.
+
+`--recipe /absolute/candidate.mlir` selects another external recipe.
+`--elements 4096 65536` specifies the default shape suite; supported element
+counts are positive multiples of 64. The current primitive still vectorizes
+64-element tiles; this experiment adds multiple logical programs rather than
+claiming support for arbitrary vector shapes or masked tails. Warmup count,
+rounds, iterations, device and timeout are configurable. The finite random
+inputs (seeds 7, 19, 42) and tolerances (atol 1e-6, rtol 1e-5) are smoke-test
+coverage, not proof of equivalence for all floating-point values.
+
+Two driver details are essential:
+
+- v2 now honors `--disable-hfusion-vectorize`, retaining normalization while
+  leaving arithmetic available to the recipes. Defaults are unchanged.
+- With Triton compilation and `--enable-auto-blockify-loop`, v2 inserts the
+  original logical-to-physical block loop before saving the checkpoint. The
+  installed launcher caps physical blocks; omitting the loop previously left
+  all elements after the first 56 tiles unwritten. Checkpoint replay must not
+  rerun this prefix.
+
+`create --triton-kernel` records the replay ABI mode in schema 2 and forwards
+`--enable-triton-kernel-compile=true --disable-ffts`. Capture must also disable
+FFTS: it is too late to remove an argument already encoded in the checkpoint.
+Old manifests without this optional field retain their previous behavior.
+The opt adapter rejects this driver-only mode. The fused runner rejects an
+unexpected LLVM ABI before attempting a launch.
+
+Validation on `npu-s5-docker`, CANN 9.2 beta2, device 0: the fresh-cache run at
+`/root/dev/npuir-fused-experiment-3/report.json` passed both variants for 4,096
+and 65,536 elements across all three seeds, with zero maximum error against
+PyTorch. Both manifests contain the same checkpoint SHA-256. The original
+vectorizer produces one vector function for the chain; the initial candidate
+produces separate multiply and add vector functions. This is a useful control
+for future recipe-driven fusion; it is not a performance improvement.
+
+| Elements | Original median (microseconds) | Recipe median (microseconds) |
+| ---: | ---: | ---: |
+| 4,096 | 5.586 | 5.854 |
+| 65,536 | 5.644 | 5.694 |
+
+These are 20 alternating rounds of 10 launches after 5 warmups and include
+scheduling gaps. An earlier successful run measured 5.496/5.521 and 5.458/5.498
+microseconds respectively; small differences should not be treated as an
+optimization result. All reports, binaries, shared bundles, raw samples and IR
+diffs remain in the remote output directories.
+
+Regression coverage checks unvectorized checkpoint contents, the shared block
+loop, both recipes' lowered ABI, replay of Triton mode, and shape/measurement
+contracts. All 25 transaction tests pass. The full local suite discovered
+1,391 tests: 1,234 passed, 136 unsupported and 21 failed. Sixteen failures match
+the documented baseline; the other five all pass in a serial focused rerun
+(`compile-pure-elemwise-dynamic`, `compile-rms-norm-fp32-split-d`,
+`compile-triton-add`, `compile-triton-clampf`, and `device-debug/cube2`). No tests
+were weakened or disabled. Full-suite success remains outstanding.
+
+The six new experiment/recipe/test files currently have no CODEOWNERS match.
+Confirm intended ownership using workflow 2 in
+`tools/codeowners-check/DEVELOPER.en.md` before submission.

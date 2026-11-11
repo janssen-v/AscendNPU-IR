@@ -41,6 +41,11 @@ struct V2PipelineOptions : public mlir::PassPipelineOptions<V2PipelineOptions> {
       llvm::cl::desc("Require the recipe to replace selected vectorization"),
       llvm::cl::init(false)};
 
+  PassOptions::Option<bool> enableAutoBlockify{
+      *this, "enable-auto-blockify",
+      llvm::cl::desc("Map Triton logical programs onto physical cores"),
+      llvm::cl::init(false)};
+
   /// Append the device spec from `target` (bishengir-opt only).
   PassOptions::Option<bool> setTargetSpec{
       *this, "set-target-spec",

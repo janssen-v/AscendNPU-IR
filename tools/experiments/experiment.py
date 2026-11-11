@@ -60,12 +60,15 @@ def source_identity(repo):
 
 def create(bundle, checkpoint, recipe, compiler, repo, target, entry,
            preload=False, multi_buffer=False, dependency=(), adapter="opt",
-           toolchain_bin=None, backend_options="", replace_vectorization=False):
+           toolchain_bin=None, backend_options="", replace_vectorization=False,
+           triton_kernel=False):
     # Materialize inputs before publishing the manifest. No source paths are
     # needed for replay and subsequent edits to originals cannot change a run.
     compiler = compiler_identity(compiler)
     if adapter not in ("opt", "driver-llvm", "driver-binary"):
         raise ValueError("unsupported compiler adapter")
+    if type(triton_kernel) is not bool or (triton_kernel and adapter == "opt"):
+        raise ValueError("Triton kernel mode requires a driver adapter")
     if replace_vectorization and not recipe:
         raise ValueError("replacement requires a recipe")
     dependency = list(dependency)
@@ -97,7 +100,8 @@ def create(bundle, checkpoint, recipe, compiler, repo, target, entry,
                          for p in dependency},
         "pipeline": {"target": target, "entry": entry,
                      "enable_preload": preload, "enable_multi_buffer": multi_buffer,
-                     "replace_vectorization": replace_vectorization},
+                     "replace_vectorization": replace_vectorization,
+                     "triton_kernel": triton_kernel},
         "inputs": {"checkpoint.bc": digest(payload)},
     }
     if library is not None:
@@ -153,8 +157,11 @@ def validate(bundle, compiler):
     pipeline = manifest["pipeline"]
     required = {"target", "entry", "enable_preload", "enable_multi_buffer"}
     if (not isinstance(pipeline, dict) or not required <= set(pipeline)
-            or not set(pipeline) <= required | {"replace_vectorization"}):
+            or not set(pipeline) <= required | {"replace_vectorization", "triton_kernel"}):
         raise ValueError("incompatible pipeline options")
+    if (type(pipeline.get("triton_kernel", False)) is not bool
+            or (pipeline.get("triton_kernel", False) and manifest["adapter"] == "opt")):
+        raise ValueError("Triton kernel mode requires a driver adapter")
     if type(pipeline.get("replace_vectorization", False)) is not bool:
         raise ValueError("replacement switch must be boolean")
     if pipeline.get("replace_vectorization", False) and "recipe.mlir" not in inputs:
@@ -265,6 +272,9 @@ def replay(bundle, output, compiler=None, timeout=60):
                             "--hivm-pre-vectorize-recipe-entry=" + p["entry"]]
             if p.get("replace_vectorization", False):
                 command += ["--hivm-replace-vectorization"]
+            if p.get("triton_kernel", False):
+                # Triton-Ascend's launcher omits the optional FFTS argument.
+                command += ["--enable-triton-kernel-compile=true", "--disable-ffts"]
             if manifest["backend_options"]:
                 command += ["--append-bisheng-options=" + manifest["backend_options"]]
         result.update(experiment_id=manifest["experiment_id"], command=command,
@@ -317,6 +327,7 @@ def main():
     create_parser.add_argument("--preload", action="store_true")
     create_parser.add_argument("--multi-buffer", action="store_true")
     create_parser.add_argument("--replace-vectorization", action="store_true")
+    create_parser.add_argument("--triton-kernel", action="store_true")
     run_parser = commands.add_parser("replay")
     run_parser.add_argument("--bundle", required=True, type=Path)
     run_parser.add_argument("--output", required=True, type=Path)

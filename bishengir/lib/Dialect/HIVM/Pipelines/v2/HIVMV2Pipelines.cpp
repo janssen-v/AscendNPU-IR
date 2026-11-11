@@ -94,6 +94,14 @@ static void buildPreVectorizationPhase(OpPassManager &pm,
   // CV 1:2 needs operand-parallel sub-block partitioning; 1:1 targets skip it.
   if (needsCV12(hacc::symbolizeTargetDeviceEnum(options.target)))
     pm.addPass(createPartitionAndBindSubBlockPass());
+
+  // Triton's launcher caps the physical grid. Preserve all logical programs
+  // by materializing the same block loop as the original pipeline, before
+  // saving the checkpoint so every recipe shares the launch mapping.
+  if (options.enableAutoBlockify) {
+    pm.addPass(createInferFuncCoreTypePass());
+    pm.addPass(createAutoBlockifyParallelLoopPass());
+  }
 }
 
 /// Tensor phase on the unsplit MIX.

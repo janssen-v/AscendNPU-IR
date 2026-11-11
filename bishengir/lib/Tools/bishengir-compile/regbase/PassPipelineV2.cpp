@@ -52,6 +52,8 @@ void setupV2PipelineOptions(const BiShengIRCompileMainConfig &config,
   v2Options.recipe = config.getHIVMPreVectorizeRecipe();
   v2Options.recipeEntry = config.getHIVMPreVectorizeRecipeEntry();
   v2Options.replaceVectorization = config.getHIVMReplaceVectorization();
+  v2Options.enableAutoBlockify = config.getEnableTritonKernelCompile() &&
+                                 config.getEnableAutoBlockifyLoop();
   v2Options.enablePreload = hivmOptions.enablePreload;
   v2Options.enableMultiBuffer = config.getEnableAutoMultiBuffer();
 }
@@ -124,9 +126,10 @@ void buildV2HIRPipeline(OpPassManager &pm,
   if (config.getEnableHfusionCompile()) {
     auto options = std::make_unique<hfusion::HFusionPipelineOptions>();
     setupHFusionPipelineOptions(*options, config);
-    // HFusion autovectorize owns every op that
-    // is not marked hivm.defer_vectorize.
-    options->disableHfusionVectorize = false;
+    // Keep frontend normalization when capturing an unvectorized checkpoint.
+    // By default HFusion still owns ops not marked hivm.defer_vectorize;
+    // an explicit disable lets external recipes own the shared checkpoint.
+    options->disableHfusionVectorize = config.getDisableHfusionVectorize();
     hfusion::regbase::buildHFusionPipelines(pm, *options);
   }
 

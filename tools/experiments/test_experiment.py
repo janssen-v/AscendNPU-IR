@@ -177,6 +177,7 @@ class ReplayTests(unittest.TestCase):
             "#!/usr/bin/python3\nimport sys\nfrom pathlib import Path\n"
             "assert '--hivm-replay-pre-vectorize' in sys.argv\n"
             "assert '--enable-lir-compile=false' in sys.argv\n"
+            "assert '--enable-triton-kernel-compile=true' in sys.argv\n"
             "Path('intermediates').mkdir()\n"
             "Path('intermediates/candidate.ll').write_text('LLVM output')\n"
             "Path('intermediates/payload.mlir').write_text('IR')\n"
@@ -184,7 +185,8 @@ class ReplayTests(unittest.TestCase):
         with patch.object(experiment, "source_identity", return_value={}):
             experiment.create(self.bundle, self.checkpoint, self.recipe, self.compiler,
                               self.root, "Ascend950PR_9579", "__transform_main",
-                              adapter="driver-llvm", backend_options="-mllvm -example=false")
+                              adapter="driver-llvm", backend_options="-mllvm -example=false",
+                              triton_kernel=True)
         result = self.run_replay()
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["candidate"], "intermediates/candidate.ll")
@@ -192,6 +194,12 @@ class ReplayTests(unittest.TestCase):
         self.assertGreater(result["compilation_seconds"], 0)
         self.assertGreater(result["preflight_seconds"], 0)
         self.assertIn("--append-bisheng-options=-mllvm -example=false", result["command"])
+
+    def test_opt_rejects_triton_kernel_mode(self):
+        with self.assertRaisesRegex(ValueError, "requires a driver adapter"):
+            experiment.create(self.bundle, self.checkpoint, self.recipe, self.compiler,
+                              self.root, "Ascend950PR_9579", "__transform_main",
+                              triton_kernel=True)
 
     def test_trace_intervals(self):
         trace = self.root / "trace.jsonl"
