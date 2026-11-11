@@ -1,0 +1,2 @@
+# REQUIRES: system-linux
+# RUN: env BISHENGIR_EXPERIMENT_COMPILER=bishengir-opt %python %bishengir_src_root/../tools/experiments/test_experiment.py
